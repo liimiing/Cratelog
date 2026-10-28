@@ -105,6 +105,14 @@ def read_exact(stream,size):
     return bytes(result)
 
 
+def completed_frame(results, requested_at, now):
+    # A completed frame takes precedence over elapsed time (sleep/minimize).
+    try:return results.get_nowait()
+    except queue.Empty:
+        if now-requested_at>20:raise TimeoutError('OpenGL renderer did not return a frame')
+        return None
+
+
 class RenderClient:
     def __init__(self):
         self.requests=queue.Queue(maxsize=1);self.results=queue.Queue(maxsize=1)
@@ -159,6 +167,7 @@ def create_view(master,player,on_error):
             from cratelog_widgets import transport_icon
             self.menu_icon=transport_icon('list',width=20)
             self.pad_visible=False;self.head_drag=None;self.cue_index=None;self.speed_mix=0.;self.motion_lift=0.;self.key_until=0.;self.key_index=0;self.clip=0.;self.power=True;self.room_light=True
+            self.render_retries=0;self.render_recovered_at=0.;self.last_tick=time.monotonic()
             self.requested_at=0.;self.last=time.monotonic();self.active=False;self.drag_pitch=False;self.photo=None
             self.bind('<Button-1>',self.click);self.bind('<B1-Motion>',self.drag)
             self.bind('<ButtonRelease-1>',self.release)
@@ -246,25 +255,36 @@ def create_view(master,player,on_error):
         def tick(self):
             self.job=None
             if not self.active:return
+            now=time.monotonic()
+            # Count only active polling time; OS sleep and UI suspension are not GPU stalls.
+            if now-self.last_tick>2.:self.requested_at=now
+            self.last_tick=now
             if not self.winfo_viewable():
-                self.last=time.monotonic();self.job=self.after(200,self.tick);return
+                self.requested_at=now;self.last=now;self.job=self.after(200,self.tick);return
             try:
                 if self.pending:
-                    if time.monotonic()-self.requested_at>20:raise RuntimeError(tr('OpenGL 唱机渲染超时，请检查显卡驱动。'))
-                    try:w,h,data=self.client.results.get_nowait()
-                    except queue.Empty:pass
-                    else:
+                    frame=completed_frame(self.client.results,self.requested_at,now)
+                    if frame is not None:
+                        w,h,data=frame
                         self.pending=False
                         if w==0:raise RuntimeError(data.decode('utf-8',errors='replace'))
                         image=Image.frombytes('RGB',(w,h),data).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
                         if image.size!=(self.winfo_width(),self.winfo_height()):image=image.resize((max(1,self.winfo_width()),max(1,self.winfo_height())),Image.Resampling.BILINEAR)
                         self.frame=image;self.paint_overlay()
+                        if now-self.render_recovered_at>60.:self.render_retries=0
                         if (self.resume_pending and self.render_landed and self.render_generation==self.resume_generation
                                 and self.power and self.lift==0. and self.head_drag is None):
                             self.cancel_audio();self.player.set_paused(False)
                 if not self.pending:
                     state=self.state();self.render_landed=self.needle_ready;self.render_generation=self.resume_generation
                     self.client.requests.put_nowait(state);self.pending=True;self.requested_at=time.monotonic()
+            except TimeoutError:
+                if self.render_retries>=2:
+                    self.close();on_error('OpenGL 渲染连续超时，自动恢复失败。');return
+                self.render_retries+=1;self.render_recovered_at=now
+                self.client.close();self.client=RenderClient();self.pending=False
+                self.requested_at=now;self.last=now
+                self.job=self.after(100,self.tick);return
             except Exception as error:
                 self.close();on_error(str(error));return
             self.job=self.after(33,self.tick)

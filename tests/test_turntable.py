@@ -1,9 +1,10 @@
+import queue
 import math
 import sys
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from cratelog_turntable import album_progress,deck_point,tonearm_geometry,SPINDLE,PIVOT,strobe_rates,STROBE_REFERENCES,advance_arm,power_hit,camera_eye,needle_lift
+from cratelog_turntable import album_progress,deck_point,tonearm_geometry,SPINDLE,PIVOT,strobe_rates,STROBE_REFERENCES,advance_arm,power_hit,camera_eye,needle_lift,completed_frame
 
 class TurntableTests(unittest.TestCase):
     def test_duration_weighted_position_and_cue_identity(self):
@@ -77,6 +78,13 @@ class TurntableTests(unittest.TestCase):
             previous=height
         self.assertEqual(previous,0.)
         self.assertEqual(needle_lift(1.,0.,0.),1.)
+
+    def test_completed_frame_survives_long_ui_suspension(self):
+        results=queue.Queue()
+        frame=(2,2,b'pixels');results.put(frame)
+        self.assertEqual(completed_frame(results,0.,3600.),frame)
+        self.assertIsNone(completed_frame(results,3600.,3601.))
+        with self.assertRaises(TimeoutError):completed_frame(results,0.,21.)
 
     def test_projection_center(self):
         x,z=deck_point(450,300,900,600)
