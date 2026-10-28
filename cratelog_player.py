@@ -143,7 +143,7 @@ class MPV:
                    '--cache=yes', '--cache-secs=15', '--demuxer-readahead-secs=15',
                    '--demuxer-max-bytes=32MiB', '--demuxer-max-back-bytes=8MiB',
                    '--cache-pause=yes', '--cache-pause-initial=yes', '--cache-pause-wait=1',
-                   '--audio-buffer=0.5', '--gapless-audio=no',
+                   ('--audio-buffer=0.1' if sys.platform=='darwin' else '--audio-buffer=0.5'), '--gapless-audio=no',
                    '--input-default-bindings=no', '--input-vo-keyboard=no',
                    '--osc=no', '--osd-level=0', '--input-ipc-server=' + self.pipe]
         if spectrum_window and sys.platform!='darwin':
@@ -495,6 +495,7 @@ class Player:
         self.status_label.bind('<Configure>',lambda event:self.refresh_status_line())
         self.refresh_status_line()
         root.protocol('WM_DELETE_WINDOW',self.close)
+        if sys.platform=='darwin':root.createcommand('::tk::mac::Quit',self.close)
         def bind_buttons(widget):
             for child in widget.winfo_children():
                 if isinstance(child,ttk.Button):child.bind('<space>',self.space_next)
@@ -550,7 +551,11 @@ class Player:
         self.settings.update(volume=self.volume.get(),mode=self.mode.get())
         selected=[self.album['tracks'][int(i)]['filename'] for i in self.tracks.selection()] if self.album else []
         focus=self.tracks.focus()
-        self.settings['browse']={'folder':str(self.folder) if self.folder else '', 'selected':selected,
+        playing=''
+        if self.folder and self.current_track_id:
+            try:playing=self.current_track_id.relative_to(self.folder).as_posix()
+            except ValueError:pass
+        self.settings['browse']={'folder':str(self.folder) if self.folder else '', 'selected':selected,'playing':playing,
             'focus':self.album['tracks'][int(focus)]['filename'] if focus and self.album else '', 'scroll':self.tracks.yview()[0], 'expanded':expanded}
         atomic_json(self.settings_path,self.settings)
 
@@ -999,6 +1004,9 @@ class Player:
                     self.tracks.selection_set([rows[name] for name in state.get('selected',[]) if name in rows])
                     if state.get('focus') in rows:self.tracks.focus(rows[state['focus']])
                     self.tracks.yview_moveto(max(0,min(1,state.get('scroll',0))))
+                    if state.get('playing') in rows:
+                        row=rows[state['playing']]
+                        self.tracks.selection_set(row);self.tracks.focus(row);self.tracks.see(row)
         recursive=True if self.remote_catalog.lookup(folder,read_json(folder/'.cratelog.json',{})) else None
         self.submit(lambda:load_album(folder,recursive=recursive),loaded)
 
@@ -1545,6 +1553,10 @@ class Player:
 
     def set_paused(self, paused):
         if not self.engine or self.playback_state == 'stopped': return
+        if self.turntable_visible and self.turntable:
+            if paused:self.turntable.cancel_audio()
+            elif not self.turntable.needle_ready:
+                self.turntable.defer_audio();paused=True
         self.paused = bool(paused)
         if self.lastfm_listening:self.lastfm_listening.previous=None
         self.pause_text.set('继续' if self.paused else '暂停')
@@ -1552,7 +1564,9 @@ class Player:
         self.control('set_property', 'pause', self.paused)
 
     def toggle_pause(self, event=None):
-        if self.playback_state == 'stopped':
+        if self.turntable_visible and self.turntable and self.turntable.resume_pending:
+            self.set_paused(True)
+        elif self.playback_state == 'stopped':
             self.play_selected()
         else:
             self.set_paused(not self.paused)
@@ -1661,8 +1675,16 @@ class Player:
             options={'start':str(self.track_start)}
             if self.track_end is not None:options['end']=str(self.track_end)
             self.engine.command('script-message','cratelog-range',str(self.track_start),str(self.track_end if self.track_end is not None else -1))
+            wait_for_arm=bool(self.turntable_visible and self.turntable and (not continuous or not self.turntable.needle_ready))
+            if wait_for_arm:
+                self.turntable.defer_audio()
+                self.turntable.transition=time.monotonic();self.turntable.motion_lift=1.
+                self.paused=True;self.playback_state='paused'
+                self.pause_text.set(tr('继续'))
+                options['pause']='yes'
+                self.engine.command('set_property','pause',True)
             self.engine.command('loadfile',str(file),'replace',-1,options)
-            self.engine.command('set_property','pause',False)
+            self.engine.command('set_property','pause',wait_for_arm)
             if self.turntable_visible and self.turntable:self.turntable.pitch_control()
             self.tag_details='';self.audio_details=''
             self.now.set(self.cue_title or file.name); self.details.set(''); self.duration=0
@@ -1681,6 +1703,7 @@ class Player:
         if self.engine:self.engine.command(*args)
 
     def stop(self):
+        if self.turntable:self.turntable.cancel_audio()
         self.control('stop')
         self.reset_playback()
 

@@ -3,6 +3,8 @@ out vec4 color;
 uniform vec2 resolution;
 uniform float rotation, elevation, lamp, pitch;
 uniform vec2 arm_direction;
+uniform vec3 keys;
+uniform float clip_closed;
 uniform vec4 strobe_phase;
 uniform float velocity, speed_mix, power, room_light;
 uniform sampler2D cover;
@@ -12,10 +14,15 @@ float box(vec3 p,vec3 b){vec3 q=abs(p)-b;return length(max(q,0.))+min(max(q.x,ma
 float cyl(vec3 p,float r,float h){vec2 d=abs(vec2(length(p.xz),p.y))-vec2(r,h);return min(max(d.x,d.y),0.)+length(max(d,0.));}
 float tube(vec3 p,vec3 a,vec3 b,float r){vec3 v=b-a;return length(p-a-v*clamp(dot(p-a,v)/dot(v,v),0.,1.))-r;}
 float platter(vec3 p){
-    // Sloped strobe shoulder: 332 mm lower diameter, 306 mm upper diameter.
-    float slope=.13/.15;
-    vec2 q=vec2((length(p.xz)-(1.595-slope*p.y))/sqrt(1.+slope*slope),abs(p.y)-.075);
-    return length(max(q,0.))+min(max(q.x,q.y),0.);
+    // Exact radial cross-section distance: avoids overstepping the lower rim.
+    vec2 q=vec2(length(p.xz),p.y);
+    vec2 lower=vec2(1.66,-.075),upper=vec2(1.53,.075),edge=upper-lower;
+    float side=length(q-lower-edge*clamp(dot(q-lower,edge)/dot(edge,edge),0.,1.));
+    float bottom=length(q-vec2(clamp(q.x,0.,lower.x),lower.y));
+    float top=length(q-vec2(clamp(q.x,0.,upper.x),upper.y));
+    float radius=mix(lower.x,upper.x,clamp((q.y+.075)/.15,0.,1.));
+    bool inside=abs(q.y)<.075 && q.x<radius;
+    return min(side,min(bottom,top))*(inside?-1.:1.);
 }
 float strobeDot(float phase,float rowY,float size){
     vec2 cell=vec2(fract(phase)-.5,rowY-.5)/vec2(size,.30);
@@ -24,8 +31,8 @@ float strobeDot(float phase,float rowY,float size){
 }
 vec2 pick(vec2 a,vec2 b){return a.x<b.x?a:b;}
 // Scene units are 100 mm. 453 mm wide chassis; 372 mm overall depth includes rear fittings; 230 mm arm / 15 mm overhang.
-const vec2 spindle=vec2(-.57,-.12);
-const vec2 pivotXZ=vec2(1.30,-1.180943);
+const vec2 spindle=vec2(-.53,0.);
+const vec2 pivotXZ=vec2(1.30,-1.128538878);
 vec3 bezier(vec3 a,vec3 b,vec3 c,vec3 d,float t){float v=1.-t;return v*v*v*a+3.*v*v*t*b+3.*v*t*t*c+t*t*t*d;}
 vec2 scene(vec3 p){
     vec2 d=vec2(p.y+.48,0.);
@@ -38,7 +45,7 @@ vec2 scene(vec3 p){
     vec3 q=p-vec3(spindle.x,.36,spindle.y);
     d=pick(d,vec2(platter(q),12.));
     d=pick(d,vec2(cyl(p-vec3(spindle.x,.444,spindle.y),1.50,.009),4.));
-    d=pick(d,vec2(cyl(p-vec3(spindle.x,.49,spindle.y),.025,.05),5.));
+    d=pick(d,vec2(tube(p,vec3(spindle.x,.465,spindle.y),vec3(spindle.x,.515,spindle.y),.025),13.));
     // Low armboard, height-adjustment ring and open gimbal, not a tall pedestal.
     vec3 g=p-vec3(pivotXZ.x,.40,pivotXZ.y);
     d=pick(d,vec2(cyl(g,.43,.08),1.));
@@ -63,10 +70,12 @@ vec2 scene(vec3 p){
             d=pick(d,vec2(tube(local,last,pt,.045),5.));last=pt;
         }
     }
-    // Counterweight, calibration ring and rear stub aligned with the arm shaft.
-    d=pick(d,vec2(tube(local,vec3(0,0,-.43),vec3(0,0,-.12),.125),1.));
-    d=pick(d,vec2(tube(local,vec3(0,0,-.26),vec3(0,0,-.20),.13),5.));
-    d=pick(d,vec2(tube(local,vec3(0),vec3(0,0,-.51),.025),5.));
+    // Flat-ended counterweight and dial on a straight coaxial rear shaft.
+    // Adjustment position is representative; the manual gives no fixed distance.
+    d=pick(d,vec2(cyl((local-vec3(0,0,-.57)).xzy,.185,.135),3.));
+    d=pick(d,vec2(cyl((local-vec3(0,0,-.412)).xzy,.19,.023),1.));
+    d=pick(d,vec2(cyl((local-vec3(0,0,-.765)).xzy,.036,.045),5.));
+    d=pick(d,vec2(tube(local,vec3(0,0,.02),vec3(0,0,-.81),.032),5.));
     // Fixed 22 degree cartridge offset, with bayonet, slotted headshell and cartridge.
     vec2 forward=vec2(-.3746066,.9271839),right=vec2(forward.y,-forward.x);
     vec3 hr=local-vec3(0,-.19,2.30);
@@ -82,21 +91,28 @@ vec2 scene(vec3 p){
     d=pick(d,vec2(tube(head,vec3(.08,0,-.17),vec3(.18,.10,-.10),.012),1.));
     for(int i=-1;i<=1;i+=2)d=pick(d,vec2(cyl(head-vec3(float(i)*.045,.025,-.10),.017,.012),5.));
     // Fixed U-shaped rest: centered beneath the parked S tube, not beside it.
-    vec3 rest=p-vec3(1.357550,0.620088,-0.064956);
-    d=pick(d,vec2(cyl(p-vec3(1.357550,.335,-0.064956),.060,.015),1.));
-    d=pick(d,vec2(tube(p,vec3(1.357550,.34,-0.064956),vec3(1.357550,0.585088,-0.064956),.027),1.));
+    vec3 rest=p-vec3(1.357550,0.620088,-0.012552);
+    d=pick(d,vec2(cyl(p-vec3(1.357550,.335,-0.012552),.060,.015),1.));
+    d=pick(d,vec2(tube(p,vec3(1.357550,.34,-0.012552),vec3(1.357550,0.585088,-0.012552),.027),1.));
     d=pick(d,vec2(box(rest-vec3(0,-.016,0),vec3(.068,.016,.035)),1.));
     for(int jaw=-1;jaw<=1;jaw+=2)
-        d=pick(d,vec2(box(rest-vec3(float(jaw)*.061,.039,0),vec3(.014,.039,.035))-.006,1.));
-    // Open retaining clip, alongside the cradle rather than crossing the arm.
-    d=pick(d,vec2(tube(rest,vec3(.075,.05,0),vec3(.12,.105,0),.012),1.));
-    d=pick(d,vec2(tube(p,vec3(1.63,.51,-.95),vec3(1.78,.60,-.73),.018),5.));
+        d=pick(d,vec2(box(rest-vec3(float(jaw)*.061,.012,0),vec3(.012,.012,.035))-.006,1.));
+    // Right-side hinge rotates a retaining arch over the seated tube.
+    vec3 hinge=vec3(.077,.018,0);
+    d=pick(d,vec2(tube(rest,hinge-vec3(0,0,.043),hinge+vec3(0,0,.043),.017),3.));
+    vec3 latch=rest-hinge;
+    float angle=(1.-clip_closed)*-1.9;
+    latch.xy=mat2(cos(angle),-sin(angle),sin(angle),cos(angle))*latch.xy;
+    d=pick(d,vec2(tube(latch,vec3(0),vec3(0,.112,0),.012),1.));
+    d=pick(d,vec2(tube(latch,vec3(0,.112,0),vec3(-.145,.112,0),.012),1.));
+    d=pick(d,vec2(tube(latch,vec3(-.145,.112,0),vec3(-.145,.052,0),.012),1.));
+    d=pick(d,vec2(tube(p,vec3(1.63,.51,-0.897596),vec3(1.78,.60,-0.677596),.018),5.));
     // Keep speed keys beyond the platter's outer rim.
-    d=pick(d,vec2(box(p-vec3(-1.91,.34,1.39),vec3(.23,.035,.14))-.015,3.));
-    d=pick(d,vec2(box(p-vec3(-1.43,.345-.025*(1.-speed_mix),1.61),vec3(.105,.025,.035)),3.));
-    d=pick(d,vec2(box(p-vec3(-1.16,.345-.025*speed_mix,1.61),vec3(.105,.025,.035)),3.));
-    d=pick(d,vec2(box(p-vec3(-1.43,.373-.025*(1.-speed_mix),1.61),vec3(.045,.004,.012)),10.));
-    d=pick(d,vec2(box(p-vec3(-1.16,.373-.025*speed_mix,1.61),vec3(.045,.004,.012)),11.));
+    d=pick(d,vec2(box(p-vec3(-1.91,.332-.008*keys.x,1.43),vec3(.20,.022,.20))-.015,3.));
+    d=pick(d,vec2(box(p-vec3(-1.43,.322-.006*keys.y,1.61),vec3(.105,.009,.035)),3.));
+    d=pick(d,vec2(box(p-vec3(-1.16,.322-.006*keys.z,1.61),vec3(.105,.009,.035)),3.));
+    d=pick(d,vec2(box(p-vec3(-1.43,.334-.006*keys.y,1.61),vec3(.045,.004,.012)),10.));
+    d=pick(d,vec2(box(p-vec3(-1.16,.334-.006*keys.z,1.61),vec3(.045,.004,.012)),11.));
     d=pick(d,vec2(cyl(p-vec3(-2.03,.40,.94),.11,.10),5.));
     d=pick(d,vec2(cyl(p-vec3(-2.03,.51,.94),.113,.018),1.));
     d=pick(d,vec2(box(p-vec3(-1.925,.44,.94),vec3(.018,.027,.055)),8.));
@@ -113,25 +129,67 @@ vec2 scene(vec3 p){
 }
 vec3 normal(vec3 p){vec2 e=vec2(.0015,0);return normalize(vec3(scene(p+e.xyy).x-scene(p-e.xyy).x,scene(p+e.yxy).x-scene(p-e.yxy).x,scene(p+e.yyx).x-scene(p-e.yyx).x));}
 float shadow(vec3 p,vec3 l){float v=1.,t=.03;for(int i=0;i<28;i++){float h=scene(p+l*t).x;v=min(v,12.*h/t);t+=clamp(h,.025,.35);if(t>5.||v<.02)break;}return clamp(v,.12,1.);}
+// World +X is right, -Z is rear: a softbox above the rear-right corner.
+const vec3 keyLight=vec3(4.5,6.,-5.5);
+float smithLambda(vec3 w,vec3 n,vec3 tangent,vec3 radial,vec2 alpha){
+    float nw=max(dot(n,w),.0001);
+    vec2 slope=alpha*vec2(dot(tangent,w),dot(radial,w))/nw;
+    return .5*(sqrt(1.+dot(slope,slope))-1.);
+}
+float grooveBRDF(vec3 n,vec3 tangent,vec3 radial,vec3 l,vec3 v,vec2 alpha){
+    float nl=dot(n,l),nv=dot(n,v);
+    if(nl<=0. || nv<=0.)return 0.;
+    vec3 h=normalize(l+v);
+    vec3 hn=vec3(dot(h,tangent)/alpha.x,dot(h,radial)/alpha.y,dot(h,n));
+    float den=dot(hn,hn);
+    float distribution=1./(3.14159265*alpha.x*alpha.y*den*den);
+    float masking=1./(1.+smithLambda(l,n,tangent,radial,alpha)+smithLambda(v,n,tangent,radial,alpha));
+    float fresnel=.04+.96*pow(1.-max(dot(v,h),0.),5.);
+    // BRDF multiplied by N.L; alpha.x is along grooves, alpha.y across them.
+    return distribution*masking*fresnel/(4.*max(nv,.0001));
+}
+float vinylReflection(vec3 p,vec3 n,vec3 v){
+    vec2 q=p.xz-spindle;float r=length(q);
+    vec2 er=q/max(r,.0001),et=vec2(-er.y,er.x);
+    const float groovePitch=.0012; // 0.12 mm, represented statistically when unresolved.
+    float phase=r/groovePitch-(atan(q.y,q.x)-rotation)/6.2831853;
+    float resolved=1.-smoothstep(.25,.9,fwidth(phase));
+    float groove=cos(phase*6.2831853)*resolved;
+    vec2 spiral=normalize(et+er*(groovePitch/(6.2831853*r)));
+    vec3 tangent=vec3(spiral.x,0.,spiral.y),radial=normalize(cross(tangent,n));
+    vec2 alpha=vec2(.026,.30*(1.+.055*sin(r*240.)+.025*groove));
+    float reflected=0.;
+    for(int i=0;i<4;i++){
+        vec3 sampleLight=keyLight+vec3((i%2==0?-.55:.55),0.,(i<2?-.45:.45));
+        reflected+=grooveBRDF(n,tangent,radial,normalize(sampleLight-p),v,alpha);
+    }
+    return reflected*.25;
+}
 void main(){
     vec3 target=vec3(0,.15,0),fw=normalize(target-eye),rt=normalize(cross(fw,vec3(0,1,0))),up=cross(rt,fw);
     vec2 uv=(gl_FragCoord.xy-.5*resolution)/min(resolution.y,resolution.x/1.5);
     vec3 rd=normalize(fw*2.5+rt*uv.x+up*uv.y);
-    float t=0.;vec2 hit=vec2(0);vec3 p;
-    for(int i=0;i<140;i++){p=eye+rd*t;hit=scene(p);if(hit.x<.0015||t>28.)break;t+=hit.x*.85;}
+    float t=0.;vec2 hit=vec2(0);vec3 p;bool found=false;
+    for(int i=0;i<220;i++){
+        p=eye+rd*t;hit=scene(p);
+        if(hit.x<.0006){found=true;break;}
+        if(t>28.)break;
+        t+=hit.x*.85;
+    }
     vec3 col=mix(vec3(.0007,.001,.0018),vec3(.035,.043,.055),room_light);
-    if(t<28.){
-        vec3 n=normal(p),l=normalize(vec3(-3,7,4)-p),v=-rd;
+    if(found && t<28.){
+        vec3 n=normal(p),l=normalize(keyLight-p),v=-rd;
         float diff=max(dot(n,l),0.),sh=shadow(p+n*.008,l),rough=.28;
         vec3 base=vec3(.09),em=vec3(0);
-        float id=hit.y>11.5?3.:hit.y;
+        float rimDots=-1.;
+        float id=hit.y>12.5?5.:(hit.y>11.5?3.:hit.y);
         if(id<.5){base=vec3(.028,.034,.043);rough=.6;}
         else if(id<1.5){base=vec3(.022,.027,.033);rough=.34;}
         else if(id<2.5){base=vec3(.50,.53,.56)*(1.+.012*sin(p.x*850.)*exp(-abs(dFdx(p.x)*850.)));rough=.25;
             if(n.y>.8){vec4 ink=texture(panel,vec2((p.x+2.265)/4.53,1.-(p.z+1.765)/3.53));base=mix(base,ink.rgb,ink.a);}}
         else if(id<3.5){base=vec3(.52,.57,.62);rough=.17;
             vec3 q=p-vec3(spindle.x,.36,spindle.y);
-            if(hit.y>11.5 && length(q.xz)>1.50 && length(q.xz)<1.69 && abs(q.y)<.078){
+            if(hit.y>11.5 && hit.y<12.5 && length(q.xz)>1.50 && length(q.xz)<1.69 && abs(q.y)<.078){
                 base=vec3(.025,.028,.032);rough=.26;
                 if(n.y<.9){
                     float rows=clamp((.075-q.y)/.15*4.,0.,3.999);
@@ -149,8 +207,9 @@ void main(){
                     sector*=power*(1.-smoothstep(.35,.95,length(lightToPoint)))*smoothstep(1.,10.,abs(velocity));
                     float strobed=strobeDot(angle*count-strobe_phase[row],fract(rows),size);
                     float dots=mix(physical,strobed,sector);
+                    rimDots=dots;
                     base=mix(vec3(.025,.028,.032),vec3(.64,.67,.69),dots);
-                    em+=vec3(.8,.012,.002)*strobed*sector;
+                    em+=vec3(1.25,.025,.004)*strobed*sector;
                 }
             }}
         else if(id<4.5){vec2 q=p.xz-spindle;float r=length(q);rough=.13;
@@ -167,26 +226,37 @@ void main(){
         if(id>5.5 && id<6.5 || id>7.5 && id<11.5)base=mix(vec3(.012),base,power);
         em*=power;
         float spec=pow(max(dot(reflect(-l,n),v),0.),mix(150.,10.,rough));
-        if(id>3.5 && id<4.5 && length(p.xz-spindle)>.49){
-            // Concentric groove tangent in world space; highlight depends on both
-            // the light and camera, rather than a stripe painted onto the record.
-            vec2 radial=normalize(p.xz-spindle);
-            vec3 tangent=vec3(-radial.y,0,radial.x),across=vec3(radial.x,0,radial.y);
-            vec3 halfway=normalize(l+v);
-            float hn=max(dot(n,halfway),.02),ht=dot(tangent,halfway),hr=dot(across,halfway);
-            float anisotropic=exp(-(ht*ht/.001+hr*hr/.06)/(hn*hn));
-            float fresnel=.04+.96*pow(1.-max(dot(n,v),0.),5.);
-            spec=anisotropic*(.45+fresnel*1.5)+pow(max(dot(reflect(-l,n),v),0.),220.)*.35;
+        if(id>3.5 && id<4.5 && length(p.xz-spindle)>.49 && n.y>.8){
+            spec=vinylReflection(p,n,v)*3.0;
+        }
+        if(hit.y>12.5){
+            // Polished stainless spindle: neutral silver with crisp reflected lights.
+            base=vec3(.78,.81,.84);
+            vec3 reflection=reflect(-v,n);
+            float strip=pow(max(dot(reflection,normalize(vec3(-.6,1.,.4))),0.),48.);
+            float softbox=pow(max(dot(reflection,normalize(vec3(.8,.7,-.5))),0.),12.);
+            em+=room_light*vec3(.90,.94,1.)*(strip*1.8+softbox*.65);
+            spec=pow(max(dot(reflect(-l,n),v),0.),240.)*2.5;
         }
         float ao=clamp(scene(p+n*.12).x/.12,.35,1.);
-        col=(base*(.26*ao+.82*diff*sh)+vec3(spec*.65*sh))*mix(.012,1.,room_light)+em;
+        col=base*(mix(.003,.26*ao,room_light)+room_light*.82*diff*sh)+room_light*vec3(spec*.65*sh)+em;
         vec3 red=vec3(-1.925,.44,.94)-p;
         float redBeam=pow(max(dot(normalize(-red),normalize(vec3(1.,-.1,-.25))),0.),6.);
-        col+=power*vec3(1.,.025,.006)*max(dot(n,normalize(red)),0.)*redBeam/(1.+dot(red,red)*12.);
+        float rimResponse=rimDots<0.?1.:mix(.035,1.65,rimDots);
+        col+=rimResponse*power*vec3(1.,.025,.006)*max(dot(n,normalize(red)),0.)*redBeam/(1.+dot(red,red)*12.);
         vec3 glow=vec3(.465,.33+lamp*.22,1.505)-p;
         float beam=pow(max(dot(normalize(-glow),normalize(vec3(-.45,-.20,-1.))),0.),10.);
-        col+=power*vec3(.015,.22,1.2)*max(dot(n,normalize(glow)),0.)*beam*lamp/(1.+dot(glow,glow)*5.);
-        col=mix(col,mix(vec3(.0005,.0007,.0012),vec3(.025,.03,.04),room_light),1.-exp(-.012*t));
+        vec3 blueLight=power*lamp*vec3(.025,.34,1.65)*mix(2.2,1.,room_light)/(1.+dot(glow,glow)*3.);
+        col+=rimResponse*blueLight*max(dot(n,normalize(glow)),0.)*beam;
+        // The local lamp remains reflected in polished vinyl when room lights are off.
+        if(id>3.5 && id<4.5 && length(p.xz-spindle)>.49 && n.y>.8){
+            vec3 halfBlue=normalize(normalize(glow)+v);
+            float glossy=pow(max(dot(n,halfBlue),0.),180.);
+            float sheen=pow(max(dot(n,halfBlue),0.),24.);
+            float fresnel=.04+.96*pow(1.-max(dot(n,v),0.),5.);
+            col+=blueLight*beam*(glossy*18.+sheen*.8)*fresnel;
+        }
+        col=mix(col,mix(vec3(.0005,.0007,.0012),vec3(.025,.03,.04),room_light),1.-exp(-.002*t));
     }
     col=pow(max(col,0.),vec3(1./2.2));color=vec4(col,1.);
 }

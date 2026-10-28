@@ -4,8 +4,9 @@ import hashlib
 from pathlib import Path
 
 class PictureGestures:
-    def __init__(self,canvas):
+    def __init__(self,canvas,on_scale=None,on_scroll=None):
         import _tkinter
+        self.on_scale=on_scale or canvas.scale;self.on_scroll=on_scroll
         self.canvas=canvas;self.job=None;self.handle=None;self.bindings=[]
         root=Path(__file__).resolve().parent
         binary=root/'runtime/macos/libcratelog_gestures.dylib'
@@ -38,7 +39,8 @@ class PictureGestures:
         out=(ctypes.c_double*5)()
         for _ in range(256):
             if not self.lib.cratelog_gestures_pop(self.handle,out):break
-            if out[0]==1:self.canvas.scale(out[1],out[3],out[4])
+            if out[0]==1:self.on_scale(out[1],out[3],out[4])
+            elif self.on_scroll:self.on_scroll(out[1],out[2],out[3],out[4])
             else:self.canvas.pan(out[1],out[2])
         self.job=self.canvas.after(16,self.poll)
     def close(self):

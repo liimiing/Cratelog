@@ -34,8 +34,8 @@ def strobe_rates(rpm,nominal):
                  for reference,count in zip(STROBE_REFERENCES,STROBE_COUNTS))
 
 
-SPINDLE=(-.57,-.12)
-PIVOT=(1.30,SPINDLE[1]-math.sqrt(2.15**2-1.87**2))
+SPINDLE=(-.53,0.)
+PIVOT=(1.30,SPINDLE[1]-math.sqrt(2.15**2-1.83**2))
 
 
 def tonearm_geometry(progress,arm=1.):
@@ -49,6 +49,23 @@ def tonearm_geometry(progress,arm=1.):
     c=math.cos(math.radians(22));s=math.sin(math.radians(22))
     cartridge=(c*direction[0]-s*direction[1],s*direction[0]+c*direction[1])
     return tip,direction,cartridge
+
+
+def advance_arm(arm, lift, target, dt):
+    """Lift clear of the cradle before slewing; lower only at the destination."""
+    moving=abs(target-arm)>0.0001
+    lift_target=1. if moving else 0.
+    lift=max(lift_target,lift-dt*2.5) if lift>lift_target else min(lift_target,lift+dt*4.)
+    if moving and lift>=1.:
+        step=dt*.85
+        arm=min(target,arm+step) if target>arm else max(target,arm-step)
+    return arm,lift
+
+
+def needle_lift(manual, motion, remaining):
+    # A loaded track starts raised: its transition must only descend.
+    # A sine envelope starts at zero and would lift again mid-descent.
+    return max(manual,motion,max(0.,min(1.,remaining)))
 
 
 def camera_eye(yaw=.666,elevation=.596,distance=12.9):
@@ -68,6 +85,15 @@ def deck_point(x,y,width,height,eye=None,plane=.32):
     if ray[1]>=0:return None
     t=(plane-eye[1])/ray[1]
     return eye[0]+ray[0]*t,eye[2]+ray[2]*t
+
+
+def power_hit(x,y,width,height,eye):
+    # Match the raised cap; retain at least a 16 px target when zoomed out.
+    center=deck_point(x,y,width,height,eye,.51)
+    if center is None:return False
+    nearby=[deck_point(x+dx,y+dy,width,height,eye,.51) for dx,dy in ((16,0),(0,16))]
+    radius=max(.20,*(math.dist(center,p) for p in nearby if p is not None))
+    return math.dist(center,(-2.03,.94))<=radius
 
 
 def read_exact(stream,size):
@@ -126,12 +152,13 @@ def create_view(master,player,on_error):
     class View(tk.Canvas):
         def __init__(self):
             super().__init__(master,bg='#12151a',highlightthickness=0)
-            self.player=player;self.client=None;self.pending=False;self.job=None
+            self.gestures=None;self.gesture_job=None
+            self.player=player;self.resume_pending=False;self.resume_generation=0;self.needle_ready=False;self.client=None;self.pending=False;self.job=None
             self.strobe=[0.,0.,0.,0.];self.angle=0.;self.arm=0.;self.velocity=0.;self.groove=0.;self.identity='';self.continuous_target=None;self.transition=0.;self.lamp=1.;self.lamp_target=1.;self.lift=0.;self.pitch=0.;self.rpm=100/3
             self.yaw=.666;self.elevation=.596;self.distance=12.9;self.menu_open=False;self.menu_offset=0;self.frame=None;self.hits=[];self.orbit_drag=None
             from cratelog_widgets import transport_icon
             self.menu_icon=transport_icon('list',width=20)
-            self.pad_visible=False;self.head_drag=None;self.cue_index=None;self.speed_mix=0.;self.power=True;self.room_light=True
+            self.pad_visible=False;self.head_drag=None;self.cue_index=None;self.speed_mix=0.;self.motion_lift=0.;self.key_until=0.;self.key_index=0;self.clip=0.;self.power=True;self.room_light=True
             self.requested_at=0.;self.last=time.monotonic();self.active=False;self.drag_pitch=False;self.photo=None
             self.bind('<Button-1>',self.click);self.bind('<B1-Motion>',self.drag)
             self.bind('<ButtonRelease-1>',self.release)
@@ -142,13 +169,41 @@ def create_view(master,player,on_error):
                 callback=self.register(self.touchpad)
                 self.tk.call('bind',self._w,'<TouchpadScroll>',callback+' %D %x %y; break')
             except tk.TclError:self.deletecommand(callback)
+            if sys.platform=='darwin':self.bind('<Map>',self.gesture_mapped,add='+')
             self.bind('<Destroy>',lambda e:self.close() if e.widget is self else None)
+        def gesture_mapped(self,event):
+            if event.widget is self and self.gestures is None and self.gesture_job is None:
+                self.gesture_job=self.after(30,self.attach_gestures)
+        def attach_gestures(self):
+            self.gesture_job=None
+            if not self.winfo_viewable() or self.gestures is not None:return
+            try:
+                from cratelog_gestures import PictureGestures
+                self.gestures=PictureGestures(self,on_scale=self.pinch,on_scroll=self.native_scroll)
+            except (OSError,RuntimeError,AttributeError) as error:
+                from tkinter import messagebox
+                messagebox.showwarning('Cratelog',str(error),parent=self.winfo_toplevel())
+        def pinch(self,factor,x,y):
+            if math.isfinite(factor) and factor>0:
+                self.distance=max(4.2,min(22.,self.distance/factor))
+        def native_scroll(self,dx,dy,x,y):
+            from types import SimpleNamespace
+            if dy:self.wheel(SimpleNamespace(x=x,y=y),dy/30.)
         def show(self):
             self.active=True;self.last=time.monotonic();self.requested_at=time.monotonic()
             if not self.client:self.client=RenderClient()
             if self.job is None:self.tick()
+        def defer_audio(self):
+            self.resume_generation+=1;self.resume_pending=True;self.needle_ready=False
+        def cancel_audio(self):
+            self.resume_generation+=1;self.resume_pending=False
         def hide(self):
+            if self.gesture_job is not None:self.after_cancel(self.gesture_job);self.gesture_job=None
+            if self.gestures:self.gestures.close();self.gestures=None
             self.active=False
+            if self.resume_pending:
+                self.cancel_audio()
+                if self.player.playback_state!='stopped':self.player.set_paused(False)
             if self.job:self.after_cancel(self.job);self.job=None
         def close(self):
             self.hide()
@@ -160,7 +215,7 @@ def create_view(master,player,on_error):
                 except ValueError:pass
             progress,matched=album_progress(album,identity,p.position.get(),p.duration)
             if not self.power and p.playback_state!='stopped':p.stop()
-            running=self.power and matched and p.playback_state=='playing'
+            running=self.power and matched and (p.playback_state=='playing' or self.resume_pending)
             if self.head_drag is not None:
                 tracks=album.get('tracks',[])
                 if tracks:progress,_=album_progress(album,tracks[self.cue_index]['filename'],0,p.duration)
@@ -172,19 +227,22 @@ def create_view(master,player,on_error):
                 self.identity=identity
                 self.transition=0. if self.continuous_target==p.current_track_id else time.monotonic()
                 self.continuous_target=None
+            if p.playback_state=='stopped':self.cancel_audio()
             travelling=max(0.,1.-(time.monotonic()-self.transition)/.8)
-            self.speed_mix+=((1. if self.rpm==45. else 0.)-self.speed_mix)*min(1,dt*18.)
+            self.speed_mix=1. if self.rpm==45. else 0.
             self.lamp+=(self.lamp_target-self.lamp)*min(1,dt*12.)
-            self.arm+=(target-self.arm)*min(1,dt*3.5)
-            self.groove+=(progress-self.groove)*min(1,dt*8.)
+            if abs(target-self.arm)>0.0001:self.clip=0.
+            self.arm,self.motion_lift=advance_arm(self.arm,self.motion_lift,target,dt)
+            if target and self.motion_lift<1.:self.groove+=(progress-self.groove)*min(1,dt*8.)
             self.velocity+=((self.rpm*(1+self.pitch*.08) if running else 0.)-self.velocity)*min(1,dt*5.)
             self.angle=(self.angle+dt*self.velocity*math.tau/60)%math.tau
             self.strobe=[(phase+dt*rate)%1 for phase,rate in zip(self.strobe,strobe_rates(self.velocity,self.rpm))]
             w=max(1,self.winfo_width());h=max(1,self.winfo_height());scale=min(1,1200/w,800/h)
             images=album.get('images',[])
             cover=str(p.folder/images[0]['filename']) if p.folder and images else ''
+            self.needle_ready=target==1. and self.arm==1. and self.motion_lift==0. and self.lift==0. and travelling==0. and self.head_drag is None
             return dict(eye=camera_eye(self.yaw,self.elevation,self.distance),width=max(2,int(w*scale)),height=max(2,int(h*scale)),rotation=self.angle,strobe=self.strobe,velocity=self.velocity,
-                        room_light=self.room_light,power=self.power,speed_mix=self.speed_mix,progress=self.groove,arm=self.arm,lift=max(self.lift,math.sin(travelling*math.pi)),lamp=self.lamp,pitch=self.pitch,cover=cover)
+                        room_light=self.room_light,power=self.power,speed_mix=self.speed_mix,progress=self.groove,arm=self.arm,lift=needle_lift(self.lift,self.motion_lift,travelling),clip=self.clip,keys=tuple(max(0.,(self.key_until-time.monotonic())/.12) if i==self.key_index else 0. for i in range(3)),lamp=self.lamp,pitch=self.pitch,cover=cover)
         def tick(self):
             self.job=None
             if not self.active:return
@@ -201,8 +259,12 @@ def create_view(master,player,on_error):
                         image=Image.frombytes('RGB',(w,h),data).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
                         if image.size!=(self.winfo_width(),self.winfo_height()):image=image.resize((max(1,self.winfo_width()),max(1,self.winfo_height())),Image.Resampling.BILINEAR)
                         self.frame=image;self.paint_overlay()
+                        if (self.resume_pending and self.render_landed and self.render_generation==self.resume_generation
+                                and self.power and self.lift==0. and self.head_drag is None):
+                            self.cancel_audio();self.player.set_paused(False)
                 if not self.pending:
-                    self.client.requests.put_nowait(self.state());self.pending=True;self.requested_at=time.monotonic()
+                    state=self.state();self.render_landed=self.needle_ready;self.render_generation=self.resume_generation
+                    self.client.requests.put_nowait(state);self.pending=True;self.requested_at=time.monotonic()
             except Exception as error:
                 self.close();on_error(str(error));return
             self.job=self.after(33,self.tick)
@@ -243,12 +305,12 @@ def create_view(master,player,on_error):
                     texts.append((x+dx,y+dy,label,'#e9eef5'))
                     self.hits.append(((x+dx-18,y+dy-13,x+dx+18,y+dy+13),('camera',action)))
             bulb='#f6d58b' if self.room_light else '#8593a5'
-            draw.ellipse((52,14,64,26),outline=bulb,width=2)
-            draw.line((55,25,55,30,61,30,61,25),fill=bulb,width=2)
-            draw.line((56,33,60,33),fill=bulb,width=2)
+            draw.ellipse((54,17,62,25),outline=bulb,width=1)
+            draw.line((56,25,56,29,60,29,60,25),fill=bulb,width=1)
+            draw.line((57,31,59,31),fill=bulb,width=1)
             if self.room_light:
-                for line in [(58,8,58,10),(47,13,49,15),(67,13,69,11),(45,21,48,21),(68,21,71,21)]:draw.line(line,fill=bulb,width=1)
-            else:draw.line((48,34,68,12),fill=bulb,width=2)
+                for line in [(58,13,58,15),(50,16,52,18),(64,18,66,16),(49,22,51,22),(65,22,67,22)]:draw.line(line,fill=bulb,width=1)
+            else:draw.line((51,30,65,16),fill=bulb,width=1)
             self.hits.append(((44,6,76,40),('lighting','toggle')))
             self.photo=ImageTk.PhotoImage(Image.alpha_composite(image,overlay))
             if not self.find_withtag('scene'):self.create_image(0,0,anchor='nw',image=self.photo,tags='scene')
@@ -302,7 +364,9 @@ def create_view(master,player,on_error):
                 self.player.stop()
         def pitch_control(self):
             # Disable time-stretch compensation: playback rate now changes pitch too.
-            self.player.control('set_property','audio-pitch-correction',False)
+            engine=self.player.engine
+            if getattr(self,'pitch_engine',None) is not engine:
+                self.player.control('set_property','audio-pitch-correction',False);self.pitch_engine=engine
             self.player.control('set_property','speed',self.rpm/(100/3)*(1+self.pitch*.08))
 
         def click(self,event):
@@ -321,31 +385,40 @@ def create_view(master,player,on_error):
             if self.in_menu(event):return 'break'
             point=deck_point(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance))
             p=self.player
+            if power_hit(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance)):
+                self.toggle_power();return 'break'
             tip,_,_=tonearm_geometry(self.groove,self.arm)
             head=deck_point(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance),.55+self.lift*.27)
             tracks=(p.album or {}).get('tracks',[])
             if self.power and head and math.dist(head,tip)<.28 and tracks:
                 self.cue_index=next((i for i,t in enumerate(tracks) if p.folder/t['filename']==p.current_track_id),0)
-                self.head_drag=(event.x,self.cue_index);self.lift=1.;self.menu_open=True
+                self.head_drag=(event.x,self.cue_index);self.lift=1.;self.needle_ready=False;self.menu_open=True
                 if p.playback_state=='playing':p.toggle_pause()
                 self.show_cue();return 'break'
             if point is None:
                 self.orbit_drag=(event.x,event.y,self.yaw,self.elevation);return 'break'
             x,z=point
-            if abs(x+2.03)<.2 and abs(z-.94)<.2:self.toggle_power()
-            elif not self.power:
+            if not self.power:
                 self.orbit_drag=(event.x,event.y,self.yaw,self.elevation)
-            elif abs(x+1.91)<.3 and abs(z-1.39)<.23:p.toggle_pause()
+            elif abs(x+1.91)<.26 and abs(z-1.43)<.24:
+                self.key_index=0;self.key_until=time.monotonic()+.12
+                if self.resume_pending:self.cancel_audio();p.set_paused(True)
+                else:p.toggle_pause()
             elif abs(x+1.295)<.26 and abs(z-1.61)<.10:
+                self.key_index=1 if x<-1.295 else 2;self.key_until=time.monotonic()+.12
                 self.rpm=100/3 if x<-1.295 else 45.;self.pitch_control()
+            elif abs(x-1.35755)<.13 and abs(z+.012552)<.13 and self.arm==0. and self.motion_lift==0.:self.clip=1.-self.clip
             elif abs(x-.54)<.20 and abs(z-1.54)<.16:self.lamp_target=1.-self.lamp_target
             elif abs(x-1.93)<.22 and -.15<z<1.15:self.drag_pitch=True;self.drag(event)
             elif abs(x-1.93)<.2 and abs(z-1.29)<.12:
                 self.pitch=0.;self.pitch_control()
-            elif abs(x-1.70)<.2 and abs(z+.73)<.18:
+            elif abs(x-1.70)<.2 and abs(z+0.677596)<.18:
                 self.lift=1.-self.lift
-                if self.lift and p.playback_state=='playing':p.toggle_pause()
-                elif not self.lift and p.playback_state=='paused':p.toggle_pause()
+                if self.lift:self.needle_ready=False
+                if self.lift and p.playback_state=='playing':
+                    p.set_paused(True);self.defer_audio()
+                elif not self.lift and p.playback_state=='paused' and self.resume_pending:
+                    self.motion_lift=1.;self.needle_ready=False
             else:self.orbit_drag=(event.x,event.y,self.yaw,self.elevation)
             return 'break'
         def drag(self,event):
@@ -419,6 +492,8 @@ def worker():
         program['power']=float(state.get('power',True))
         program['speed_mix']=float(state.get('speed_mix',0.))
         program['velocity']=float(state.get('velocity',0.))
+        program['keys']=tuple(state.get('keys',(0.,0.,0.)))
+        program['clip_closed']=float(state.get('clip',0.))
         program['arm_direction']=tonearm_geometry(state['progress'],state['arm'])[1]
         program['elevation']=state['lift']*.12+(1.-state['arm'])*.04
         gl.glActiveTexture(gl.GL_TEXTURE0);gl.glBindTexture(cover_tex.target,cover_tex.id);program['cover']=0

@@ -17,7 +17,7 @@ def pump(root,until=lambda:False,seconds=1):
         root.update();time.sleep(.02)
         if until():return
 
-with tempfile.TemporaryDirectory() as tmp, patch('cratelog_player.BASE',Path(tmp)):
+with tempfile.TemporaryDirectory() as tmp, patch('cratelog_player.BASE',Path(tmp)), patch('cratelog_player.state_dir',return_value=Path(tmp)):
     base=Path(tmp);music=base/'music';album=music/'Artist'/'Album';album.mkdir(parents=True)
     for i in range(80):(album/f'{i:02}.wav').write_bytes(b'')
     with wave.open(str(album/'01.wav'),'wb') as audio:
@@ -55,5 +55,23 @@ with tempfile.TemporaryDirectory() as tmp, patch('cratelog_player.BASE',Path(tmp
     player.remote_catalog=CatalogIndex();player.paint_remote_folders()
     assert not player.tree.item(str(album),'tags')
     assert not player.review_summary.cget('text').startswith('☁ ')
+    # The playing identity takes precedence over a different selected row.
+    player.current_track_id=album/'01.wav'
+    # Exercise the same Tcl Quit callback used by Cocoa's application menu.
+    root.tk.eval('namespace eval ::tk::mac {}')
+    import ast
+    from types import SimpleNamespace
+    module=ast.parse(Path(sys.modules[Player.__module__].__file__).read_text(encoding='utf-8'))
+    init=next(n for n in ast.walk(module) if isinstance(n,ast.FunctionDef) and n.name=='__init__' and any(isinstance(c,ast.Constant) and c.value=='::tk::mac::Quit' for c in ast.walk(n)))
+    binding=next(n for n in init.body if isinstance(n,ast.If) and any(isinstance(c,ast.Constant) and c.value=='::tk::mac::Quit' for c in ast.walk(n)))
+    exec(compile(ast.Module(body=[binding],type_ignores=[]),'<mac-quit-binding>','exec'),{'sys':SimpleNamespace(platform='darwin'),'root':root,'self':player})
+    root.tk.call('::tk::mac::Quit')
+    saved=json.loads((base/'cratelog_settings.json').read_text(encoding='utf-8'))
+    assert saved['browse']['playing']=='01.wav'
+    root=tk.Tk();player=Player(root);pump(root,lambda:player.album is not None,seconds=3)
+    assert player.folder==album
+    assert [player.tracks.set(i,'file') for i in player.tracks.selection()]==['01.wav']
+    assert player.tracks.set(player.tracks.focus(),'file')=='01.wav'
+    assert player.engine is None and player.playback_state=='stopped'
     player.close()
 print('PASS: window dimensions, splitter, folder tree, filename selection, focus and scroll restored without autoplay')
