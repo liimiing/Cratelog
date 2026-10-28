@@ -17,9 +17,15 @@ try:
     with patch('cratelog_turntable.deck_point',return_value=(SPINDLE[0],-1.)):
         v.scratch_drag(Mock(x=0,y=0))
     assert v.scratch['velocity']<0 and v.scratch['position']<30.
-    v.after_cancel(v.scratch_job);v.scratch_job=None;v.scratch_tick()
+    v.after_cancel(v.scratch_job);v.scratch_job=None;v.scratch['audio_at']-=.05;v.scratch_tick()
     p.control.assert_any_call('set_property','play-direction','backward')
+    p.seek.assert_not_called()
+    direction_calls=[c for c in p.control.call_args_list if c.args[:2]==('set_property','play-direction')]
+    v.scratch['velocity']=0.;v.scratch['audio_velocity']=0.;v.scratch['last']-=1.
+    v.after_cancel(v.scratch_job);v.scratch_job=None;v.scratch_tick()
+    assert len([c for c in p.control.call_args_list if c.args[:2]==('set_property','play-direction')])==len(direction_calls)
     v.end_scratch()
+    p.seek.assert_called_once()
     assert v.scratch is None and v.scratch_job is None
     p.control.assert_any_call('set_property','play-direction','forward')
     p.set_paused.assert_called_with(False)

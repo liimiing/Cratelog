@@ -391,7 +391,9 @@ def create_view(master,player,on_error):
             self.scratch=dict(angle=math.atan2(point[1]-SPINDLE[1],point[0]-SPINDLE[0]),
                 started=time.monotonic(),last=time.monotonic(),sent=0.,dragged=False,
                 position=p.position.get(),identity=p.current_track_id,resume=p.playback_state=='playing',
-                initial=self.velocity,velocity=self.velocity,direction='forward',rate=None,paused=None,seeked=None)
+                initial=self.velocity,velocity=self.velocity,direction='forward',rate=None,paused=None,seeked=None,
+                audio_velocity=self.velocity,audio_at=time.monotonic(),rate_at=0.)
+            p.control('set_property','audio-pitch-correction',False)
             self.scratch_tick()
         def scratch_tick(self):
             self.scratch_job=None;s=self.scratch
@@ -401,20 +403,22 @@ def create_view(master,player,on_error):
                 self.end_scratch(False);return
             if not s['dragged']:
                 s['velocity']=s['initial']*max(0.,1.-(now-s['started'])/.16)
-            elif now-s['last']>.09:s['velocity']=0.
-            speed=abs(s['velocity'])/(100/3)
+            elif now-s['last']>.16:s['velocity']=0.
+            dt=max(0.,now-s['audio_at']);s['audio_at']=now
+            s['audio_velocity']+=(s['velocity']-s['audio_velocity'])*(1.-math.exp(-dt/.025))
+            if not s['dragged']:s['audio_velocity']=s['velocity']
+            speed=abs(s['audio_velocity'])/(100/3)
             paused=speed<.03 or not self.needle_ready
-            direction='backward' if s['velocity']<0 else 'forward'
+            direction=s['direction'] if paused else ('backward' if s['audio_velocity']<0 else 'forward')
             if direction!=s['direction']:
                 p.control('set_property','play-direction',direction);s['direction']=direction
             rate=round(max(.05,min(4.,speed)),2)
-            if rate!=s['rate']:
-                p.control('set_property','audio-pitch-correction',False)
-                p.control('set_property','speed',rate);s['rate']=rate
+            if s['rate'] is None or (now-s['rate_at']>=.05 and abs(rate-s['rate'])>=.04):
+                p.control('set_property','speed',rate);s['rate']=rate;s['rate_at']=now
             if paused!=s['paused']:
                 p.control('set_property','pause',paused);s['paused']=paused
-            if s['dragged'] and s['position']!=s['seeked'] and now-s['sent']>=.06:
-                p.seek(s['position']);s['sent']=now;s['seeked']=s['position']
+            # Keep the decoder running throughout the gesture. Repeated exact
+            # seeks flush its audio buffer; reconcile position only on release.
             self.scratch_job=self.after(20,self.scratch_tick)
         def end_scratch(self,resume=True):
             s=self.scratch
