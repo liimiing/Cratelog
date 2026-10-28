@@ -1647,6 +1647,7 @@ class Player:
         self.active_subtitle = None
 
     def play(self,continuous=False):
+        if self.turntable:self.turntable.end_scratch(False)
         try:
             self.ensure_engine()
             identity=self.playlist[self.play_index]
@@ -1703,6 +1704,7 @@ class Player:
         if self.engine:self.engine.command(*args)
 
     def stop(self):
+        if self.turntable:self.turntable.end_scratch(False)
         if self.turntable:self.turntable.cancel_audio()
         self.control('stop')
         self.reset_playback()

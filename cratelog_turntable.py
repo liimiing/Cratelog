@@ -160,6 +160,7 @@ def create_view(master,player,on_error):
     class View(tk.Canvas):
         def __init__(self):
             super().__init__(master,bg='#12151a',highlightthickness=0)
+            self.scratch=None;self.scratch_job=None
             self.gestures=None;self.gesture_job=None
             self.player=player;self.resume_pending=False;self.resume_generation=0;self.needle_ready=False;self.client=None;self.pending=False;self.job=None
             self.strobe=[0.,0.,0.,0.];self.angle=0.;self.arm=0.;self.velocity=0.;self.groove=0.;self.identity='';self.continuous_target=None;self.transition=0.;self.lamp=1.;self.lamp_target=1.;self.lift=0.;self.pitch=0.;self.rpm=100/3
@@ -207,6 +208,7 @@ def create_view(master,player,on_error):
         def cancel_audio(self):
             self.resume_generation+=1;self.resume_pending=False
         def hide(self):
+            self.end_scratch()
             if self.gesture_job is not None:self.after_cancel(self.gesture_job);self.gesture_job=None
             if self.gestures:self.gestures.close();self.gestures=None
             self.active=False
@@ -243,8 +245,9 @@ def create_view(master,player,on_error):
             if abs(target-self.arm)>0.0001:self.clip=0.
             self.arm,self.motion_lift=advance_arm(self.arm,self.motion_lift,target,dt)
             if target and self.motion_lift<1.:self.groove+=(progress-self.groove)*min(1,dt*8.)
-            self.velocity+=((self.rpm*(1+self.pitch*.08) if running else 0.)-self.velocity)*min(1,dt*5.)
-            self.angle=(self.angle+dt*self.velocity*math.tau/60)%math.tau
+            if self.scratch is not None:self.velocity=self.scratch["velocity"]
+            else:self.velocity+=((self.rpm*(1+self.pitch*.08) if running else 0.)-self.velocity)*min(1,dt*5.)
+            if self.scratch is None or not self.scratch["dragged"]:self.angle=(self.angle+dt*self.velocity*math.tau/60)%math.tau
             self.strobe=[(phase+dt*rate)%1 for phase,rate in zip(self.strobe,strobe_rates(self.velocity,self.rpm))]
             w=max(1,self.winfo_width());h=max(1,self.winfo_height());scale=min(1,1200/w,800/h)
             images=album.get('images',[])
@@ -364,6 +367,7 @@ def create_view(master,player,on_error):
             if dy:self.wheel(SimpleNamespace(x=int(x),y=int(y)),dy/30)
             return 'break'
         def release(self,event):
+            self.end_scratch()
             self.drag_pitch=False;self.orbit_drag=None
             if self.head_drag is not None:
                 self.head_drag=None;self.lift=0.
@@ -382,6 +386,56 @@ def create_view(master,player,on_error):
             if not self.power:
                 self.head_drag=None;self.drag_pitch=False;self.lift=0.
                 self.player.stop()
+        def begin_scratch(self,point):
+            p=self.player
+            self.scratch=dict(angle=math.atan2(point[1]-SPINDLE[1],point[0]-SPINDLE[0]),
+                started=time.monotonic(),last=time.monotonic(),sent=0.,dragged=False,
+                position=p.position.get(),identity=p.current_track_id,resume=p.playback_state=='playing',
+                initial=self.velocity,velocity=self.velocity,direction='forward',rate=None,paused=None,seeked=None)
+            self.scratch_tick()
+        def scratch_tick(self):
+            self.scratch_job=None;s=self.scratch
+            if s is None:return
+            p=self.player;now=time.monotonic()
+            if p.current_track_id!=s['identity'] or p.playback_state=='stopped':
+                self.end_scratch(False);return
+            if not s['dragged']:
+                s['velocity']=s['initial']*max(0.,1.-(now-s['started'])/.16)
+            elif now-s['last']>.09:s['velocity']=0.
+            speed=abs(s['velocity'])/(100/3)
+            paused=speed<.03 or not self.needle_ready
+            direction='backward' if s['velocity']<0 else 'forward'
+            if direction!=s['direction']:
+                p.control('set_property','play-direction',direction);s['direction']=direction
+            rate=round(max(.05,min(4.,speed)),2)
+            if rate!=s['rate']:
+                p.control('set_property','audio-pitch-correction',False)
+                p.control('set_property','speed',rate);s['rate']=rate
+            if paused!=s['paused']:
+                p.control('set_property','pause',paused);s['paused']=paused
+            if s['dragged'] and s['position']!=s['seeked'] and now-s['sent']>=.06:
+                p.seek(s['position']);s['sent']=now;s['seeked']=s['position']
+            self.scratch_job=self.after(20,self.scratch_tick)
+        def end_scratch(self,resume=True):
+            s=self.scratch
+            if s is None:return
+            self.scratch=None
+            if self.scratch_job is not None:self.after_cancel(self.scratch_job);self.scratch_job=None
+            p=self.player
+            p.control('set_property','play-direction','forward');self.pitch_control()
+            if resume and p.current_track_id==s['identity'] and p.playback_state!='stopped':
+                if s['dragged']:p.seek(s['position'])
+                p.set_paused(not s['resume'])
+        def scratch_drag(self,event):
+            point=deck_point(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance),.453)
+            if point is None or math.dist(point,SPINDLE)<.15:return
+            s=self.scratch;now=time.monotonic()
+            angle=math.atan2(point[1]-SPINDLE[1],point[0]-SPINDLE[0])
+            delta=math.atan2(math.sin(angle-s['angle']),math.cos(angle-s['angle']))
+            dt=max(.008,now-s['last']);s['angle']=angle;s['last']=now;s['dragged']=True
+            s['velocity']=max(-133.,min(133.,delta/dt*60/math.tau))
+            s['position']=max(0.,min(max(0.,self.player.duration-.02),s['position']+delta/math.tau*60/(100/3)))
+            self.angle=(self.angle+delta)%math.tau
         def pitch_control(self):
             # Disable time-stretch compensation: playback rate now changes pitch too.
             engine=self.player.engine
@@ -415,6 +469,9 @@ def create_view(master,player,on_error):
                 self.head_drag=(event.x,self.cue_index);self.lift=1.;self.needle_ready=False;self.menu_open=True
                 if p.playback_state=='playing':p.toggle_pause()
                 self.show_cue();return 'break'
+            record=deck_point(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance),.453)
+            if self.power and record and .15<math.dist(record,SPINDLE)<1.50 and p.current_track_id and self.needle_ready:
+                self.begin_scratch(record);return 'break'
             if point is None:
                 self.orbit_drag=(event.x,event.y,self.yaw,self.elevation);return 'break'
             x,z=point
@@ -442,6 +499,7 @@ def create_view(master,player,on_error):
             else:self.orbit_drag=(event.x,event.y,self.yaw,self.elevation)
             return 'break'
         def drag(self,event):
+            if self.scratch is not None:self.scratch_drag(event);return 'break'
             if self.head_drag is not None:
                 x,index=self.head_drag;tracks=(self.player.album or {}).get('tracks',[])
                 self.cue_index=max(0,min(len(tracks)-1,index-round((event.x-x)/36)))
