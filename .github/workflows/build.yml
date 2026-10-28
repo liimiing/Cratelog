@@ -1,0 +1,41 @@
+name: Build packages
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m venv .venv
+      - shell: powershell
+        run: ./tools/install_windows.ps1
+      - shell: powershell
+        run: ./tools/build_windows.ps1
+      - shell: powershell
+        env:
+          CRATELOG_SKIP_GL_TEST: '1'
+        run: |
+          $process = Start-Process dist/Cratelog/Cratelog.exe -ArgumentList '--self-test', 'packaged-check.json' -WindowStyle Hidden -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw (Get-Content packaged-check.json -Raw) }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cratelog-Windows
+          path: |
+            dist/Cratelog-Windows.zip
+            dist/build-environment.txt
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash install_macos.sh
+      - run: bash build_macos.command
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cratelog-macOS
+          path: |
+            dist/Cratelog-macOS.zip
+            dist/build-environment.txt

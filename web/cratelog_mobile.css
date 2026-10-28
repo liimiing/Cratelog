@@ -1,0 +1,57 @@
+/* Touch layouts keep the desktop table and sticky heading unchanged. */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-padding-bottom:160px}
+button,a,input,select,textarea{touch-action:manipulation}
+button{cursor:pointer}button:disabled{cursor:default}
+:focus-visible{outline:2px solid #f59a38;outline-offset:3px}
+.detail-grid>*{min-width:0}.album-hero>div{min-width:0}
+.album-hero h2,.document-preview strong{overflow-wrap:anywhere}
+.document-preview iframe{background:#fff}
+dialog{overscroll-behavior:contain}
+dialog::backdrop{background:#000b}
+body:has(dialog[open]){overflow:hidden}
+.pagination-footer{padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}
+.editor input[type=checkbox]{display:inline-block;width:20px;height:20px;vertical-align:middle;margin:0 8px}
+@media(min-width:761px){
+ .album-list th:nth-child(2){width:92px}
+ .album-list td:nth-child(2){padding-right:18px}
+ .album-list td:nth-child(3){padding-left:18px}
+ .album-list .thumb{width:62px;height:62px;max-width:none}
+}
+@media(max-width:760px){
+ body{margin:16px auto;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+ input,select,textarea{font-size:16px}button,.action{min-height:44px}
+ body>h1{font-size:25px;letter-spacing:2px}body>h1 img{width:40px;height:40px}
+ body>h1+p{line-height:2.2}body>h1+p a{display:inline-block}
+ .search-form input[name=q]{flex-basis:100%!important;width:100%;min-width:0!important}
+ .search-form button{flex:1}
+ .album-list{overflow:visible}.album-list table,.album-list tbody{display:block;width:100%}
+ .album-list thead{display:none}
+ .album-list .album-row{display:grid;grid-template-columns:66px minmax(0,1fr);gap:6px 12px;margin:14px 0;padding:14px;background:#22262a;border:1px solid #343a40;border-radius:10px}
+ .album-list td{display:block;border:0!important;padding:0!important;width:auto!important;max-width:none!important;font-size:14px!important;min-width:0}
+ .album-list td:nth-child(1){grid-column:1;grid-row:2;color:#a3adb5;font-size:12px!important}
+ .album-list td:nth-child(1)::before{content:'# '}
+ .album-list td:nth-child(2){grid-column:1;grid-row:1}
+ .album-list .thumb{width:66px!important;height:66px!important}
+ .album-list td:nth-child(3){grid-column:2;grid-row:1;font-size:16px!important}
+ .album-list td:nth-child(3) a{display:block;line-height:1.5;padding-bottom:6px}
+ .album-list td:nth-child(4){grid-column:1/-1;grid-row:5;font-size:12px!important;color:#919ba3}
+ .album-list td:nth-child(5){grid-column:2;grid-row:2}
+ .album-list td:nth-child(5) br{display:block;content:'';margin-top:4px}
+ .album-list td:nth-child(6){grid-column:2;grid-row:3}
+ .album-list td:nth-child(7){grid-column:1/-1;grid-row:4;line-height:1.6}
+ .pagination-buttons{flex-wrap:nowrap;justify-content:flex-start;overflow-x:auto;padding:2px 0 6px;scrollbar-width:thin}
+ .pagination-buttons>*{flex-shrink:0}.pagination-buttons button{min-width:44px;min-height:44px}
+ .pagination-buttons .muted{width:auto!important;white-space:nowrap}
+ .pagination-footer{padding-left:12px;padding-right:12px}.database-credit{margin-top:4px}
+ .album-hero{flex-wrap:wrap;gap:16px;margin:24px 0}.album-hero h2{font-size:24px}
+ .album-hero .action{margin-bottom:8px}.detail-grid article{padding:18px}
+ .facts{grid-template-columns:85px minmax(0,1fr);gap:12px}
+ .detail-grid table{table-layout:fixed}.detail-grid td{padding:9px 5px;overflow-wrap:anywhere}
+ .gallery{gap:12px}.gallery img{max-width:100%}
+ .attachment{display:flex;flex-wrap:wrap;gap:10px}.attachment a{min-height:44px;display:inline-flex;align-items:center;overflow-wrap:anywhere;max-width:100%}.preview-link{margin-left:0}
+ .document-preview{width:calc(100vw - 16px);max-width:calc(100vw - 16px);height:90vh;height:90dvh;max-height:96dvh;padding:12px}
+ .document-preview header{gap:8px}.document-preview header button{flex-shrink:0}
+ .document-preview p{font-size:12px}.lightbox{max-width:96vw;max-height:94dvh;padding:10px}.lightbox img{max-width:90vw;max-height:78dvh}
+ .editor{padding:12px;margin:16px auto}.editor label{overflow-wrap:anywhere}
+}
