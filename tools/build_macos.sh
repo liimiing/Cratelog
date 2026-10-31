@@ -30,3 +30,13 @@ xcrun clang -dynamiclib -fobjc-arc -fblocks -O2 \
     native/cratelog_gestures.m -framework Cocoa -o "$CRATELOG_GESTURE_OUTPUT"
 mv "$CRATELOG_GESTURE_OUTPUT" runtime/macos/libcratelog_gestures.dylib
 echo '已编译原生图片捏合手势组件。'
+
+CRATELOG_TURNTABLE_OUTPUT="$(mktemp runtime/macos/libcratelog_turntable.XXXXXX)"
+trap 'rm -f "$CRATELOG_TURNTABLE_OUTPUT"' EXIT
+CRATELOG_TURNTABLE_HASH="$(shasum -a 256 native/cratelog_turntable.m | cut -d ' ' -f 1)"
+xcrun clang -dynamiclib -fobjc-arc -fblocks -std=gnu11 -O2 \
+    "-DCRATELOG_TURNTABLE_HASH=\"$CRATELOG_TURNTABLE_HASH\"" \
+    -Wno-deprecated-declarations native/cratelog_turntable.m \
+    -framework Cocoa -framework OpenGL -framework CoreText -o "$CRATELOG_TURNTABLE_OUTPUT"
+mv "$CRATELOG_TURNTABLE_OUTPUT" runtime/macos/libcratelog_turntable.dylib
+echo '已编译唱机 GPU 直接显示组件。'

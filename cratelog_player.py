@@ -143,7 +143,7 @@ class MPV:
                    '--cache=yes', '--cache-secs=15', '--demuxer-readahead-secs=15',
                    '--demuxer-max-bytes=32MiB', '--demuxer-max-back-bytes=8MiB',
                    '--cache-pause=yes', '--cache-pause-initial=yes', '--cache-pause-wait=1',
-                   ('--audio-buffer=0.1' if sys.platform=='darwin' else '--audio-buffer=0.5'), '--gapless-audio=no',
+                   '--audio-buffer=0.5', '--gapless-audio=no',
                    '--input-default-bindings=no', '--input-vo-keyboard=no',
                    '--osc=no', '--osd-level=0', '--input-ipc-server=' + self.pipe]
         if spectrum_window and sys.platform!='darwin':
@@ -311,7 +311,7 @@ class Player:
         self.pending_restore = None
         self.normal_geometry = self.settings.get('layout', {}).get('geometry', '1280x820')
         def remember_geometry(event):
-            if event.widget is root and root.state()=='normal':self.normal_geometry=root.geometry()
+            if event.widget is root and root.state()=='normal' and not root.attributes('-fullscreen'):self.normal_geometry=root.geometry()
         root.bind('<Configure>',remember_geometry,add='+')
         self.url = tk.StringVar(value=self.settings.get('url', ''))
         self.token = tk.StringVar(value=self.settings.get('token', os.getenv('CRATELOG_API_TOKEN', '')))
@@ -974,13 +974,21 @@ class Player:
 
     def choose_folder(self,event=None):
         selection=self.tree.selection()
-        if selection and Path(selection[0]).is_dir() and Path(selection[0])!=self.folder: self.load_folder(Path(selection[0]))
+        if selection and Path(selection[0]).is_dir():
+            folder=Path(selection[0])
+            if self.turntable_visible and self.turntable and self.album:
+                self.turntable.offer_folder(folder)
+            elif folder!=self.folder:self.load_folder(folder)
 
     def submit(self,work,done):
         future=self.pool.submit(work)
         future.add_done_callback(lambda f:self.events.put(('done',(f,done))))
 
-    def load_folder(self,folder,autoplay=False):
+    def load_folder(self,folder,autoplay=False,prepared=None):
+        self.remember_playing_album()
+        if self.turntable and prepared is None:
+            self.turntable.disc_generation+=1;self.turntable.pending_disc=None
+            self.turntable.swap_disc=None;self.turntable.swap_started=None
         self.load_generation += 1
         generation = self.load_generation
         self.folder=folder; self.album=None
@@ -1008,7 +1016,8 @@ class Player:
                         row=rows[state['playing']]
                         self.tracks.selection_set(row);self.tracks.focus(row);self.tracks.see(row)
         recursive=True if self.remote_catalog.lookup(folder,read_json(folder/'.cratelog.json',{})) else None
-        self.submit(lambda:load_album(folder,recursive=recursive),loaded)
+        if prepared is not None:loaded(prepared)
+        else:self.submit(lambda:load_album(folder,recursive=recursive),loaded)
 
     def display_metadata(self):
         m=dict(self.album.get('metadata',{}))
@@ -1472,19 +1481,51 @@ class Player:
     def update_play_button(self):
         self.transport_buttons['play'].configure(image=self.transport_icons['pause' if self.current_file and not self.paused else 'play'])
 
+    def remember_playing_album(self):
+        if self.album and self.folder and self.current_track_id:
+            if any(self.folder/t['filename']==self.current_track_id for t in self.album['tracks']):
+                self.playing_album_context=(self.folder,self.album)
+
+    def sync_turntable_album(self):
+        view=self.turntable
+        browsed_folder,browsed_album=self.folder,self.album
+        mounted=getattr(self,'playing_album_context',None) if self.current_track_id else None
+        if mounted is None:mounted=view.mounted_context
+        if mounted and mounted[0]!=browsed_folder:
+            # Restore the album actually mounted/playing, while keeping the most
+            # recently browsed directory as the next sleeve, never an old preview.
+            self.load_generation+=1
+            view.disc_generation+=1;view.pending_disc=None;view.swap_disc=None;view.swap_started=None
+            self.folder,self.album=mounted;self.render()
+            if browsed_folder:
+                if browsed_album and browsed_album.get('tracks'):view.pending_disc=(browsed_folder,browsed_album)
+                elif browsed_album is None:view.offer_folder(browsed_folder)
+        elif view.pending_disc and view.pending_disc[0]==self.folder:
+            view.disc_generation+=1;view.pending_disc=None
+        view.mounted_context=(self.folder,self.album) if self.album else None
+        view.overlay_key=None
+
     def toggle_turntable(self):
         if self.turntable_visible:
+            candidate=self.turntable.pending_disc
             self.turntable.hide();self.turntable.pack_forget()
             self.track_table.pack(fill='both',expand=True);self.turntable_visible=False
             self.view_button.configure(image=self.view_icons['turntable'])
             self.control('set_property','speed',1.)
             self.control('set_property','audio-pitch-correction',True)
             self.turntable.pitch=0.;self.turntable.rpm=100/3
+            selection=self.tree.selection()
+            if selection:
+                folder=Path(selection[0])
+                if folder.is_dir() and folder!=self.folder:
+                    prepared=candidate[1] if candidate and candidate[0]==folder else None
+                    self.load_folder(folder,prepared=prepared)
             return
         if self.turntable is None:
             from cratelog_turntable import create_view
             self.turntable=create_view(self.track_area,self,self.turntable_error)
-        self.track_table.pack_forget();self.turntable.pack(fill='both',expand=True)
+        self.sync_turntable_album()
+        self.track_table.pack_forget();self.turntable.pack(in_=self.track_area,fill='both',expand=True)
         self.turntable_visible=True;self.view_button.configure(image=self.view_icons['list'])
         self.turntable.show()
 
@@ -1657,6 +1698,7 @@ class Player:
             self.current_file = file
             if self.turntable:self.turntable.continuous_target=identity if continuous else None
             self.current_track_id=identity
+            self.remember_playing_album()
             self.track_start=source.get('start',0)
             self.track_end=source.get('end')
             self.cue_title=source.get('title','')

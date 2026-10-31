@@ -23,10 +23,10 @@ def build():
         if not mpv:raise SystemExit('Install mpv with Homebrew first.')
         args+=['--add-binary',str(Path(mpv).resolve())+sep+'runtime/mpv']
         native=ROOT/'runtime/macos'
-        if not (native/'libcratelog.dylib').exists():raise SystemExit('Run bash tools/build_macos.sh first.')
+        if not all((native/name).exists() for name in ('libcratelog.dylib','libcratelog_turntable.dylib','libcratelog_gestures.dylib')):raise SystemExit('Run bash tools/build_macos.sh first.')
         for lib in native.glob('*.dylib'):args+=['--add-binary',str(lib)+sep+'runtime/macos']
     run(args+[str(ROOT/'cratelog.py')])
-    run(common+['--name','CratelogRender','--console','--collect-all','pyglet','--add-data',str(ROOT/'cratelog_turntable.frag')+sep+'.',str(ROOT/'tools/turntable_worker.py')])
+    run(common+['--name','CratelogRender','--console','--collect-all','pyglet','--add-data',str(ROOT/'cratelog_turntable.frag')+sep+'.','--add-data',str(ROOT/'web/assets/cratelog.png')+sep+'web/assets',str(ROOT/'tools/turntable_worker.py')])
     if sys.platform=='darwin':
         output=ROOT/'dist/Cratelog.app';resources=output/'Contents/Resources'
     else:output=ROOT/'dist/Cratelog';resources=output/'_internal'

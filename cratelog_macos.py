@@ -103,6 +103,12 @@ class NativeProcess:
         if line!=self.last_trace:
             print('CRATELOG_GEOMETRY '+line,flush=True);self.last_trace=line
         self.trace_job=self.host.after(250,self.trace_geometry)
+    def render_stats(self):
+        values=(ctypes.c_uint64*3)()
+        method=self.lib.cratelog_render_stats
+        method.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_uint64)];method.restype=None
+        method(self.handle,values)
+        return dict(zip(('frames','wakeups','skipped'),values))
     def frame_count(self):return self.lib.cratelog_frames(self.handle) if self.handle else 0
     def terminate(self):
         if self.trace_job:

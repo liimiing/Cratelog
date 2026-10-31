@@ -60,3 +60,18 @@ when the renderer fails. Windows playback is based on an external mpv process; m
 Delete the checkout or packaged app. User settings are kept independently; remove the Cratelog app-data
 folder only if you want to erase settings, authorization and queued scrobbles. Music folders are never removed
 by installation/uninstallation. Python/Homebrew packages are shared system tools and are not uninstalled automatically.
+
+
+### Mac 唱机 GPU 直接显示
+
+更新源码后，在 Mac 项目目录执行 `bash tools/build_macos.sh`，重新启动播放器。
+唱机优先使用 `runtime/macos/libcratelog_turntable.dylib`，保留原有着色器和超采样，
+GPU 内缩放后直接显示；不再将每帧画面读回 Python。菜单纹理仅在内容改变时上传。
+组件缺失、源码版本不一致或初始化/绘制失败时，自动使用原图片渲染路径，并在状态栏说明。
+
+真实原生组件验证：`.venv-macos/bin/python tools/check_turntable_native.py --seconds 15`。
+它会显示日间、夜间唱机，并输出帧率和该进程 CPU；该脚本遇到原生组件问题直接失败，不会悄悄回退。
+需另行实机检查 Retina/外接屏、窗口缩放、最小化恢复、菜单、双指手势和刮碟。
+若需对比旧路径，使用 `CRATELOG_TURNTABLE_RENDERER=compat .venv-macos/bin/python cratelog.py` 启动。
+比较时使用相同曲目、窗口尺寸、显示器和界面，记录主进程、子进程总 CPU 和 GPU 功耗。
+Windows 回归通过不代表 Cocoa 编译、Mac 画质或性能已经验证。

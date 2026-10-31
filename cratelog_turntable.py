@@ -73,7 +73,32 @@ def camera_eye(yaw=.666,elevation=.596,distance=12.9):
             .15+distance*math.sin(elevation),distance*math.cos(elevation)*math.cos(yaw))
 
 
-def deck_point(x,y,width,height,eye=None,plane=.32):
+def exchange_pose(progress):
+    def ease(a,b):
+        t=max(0.,min(1.,(progress-a)/(b-a)));return t*t*(3.-2.*t)
+    slide,lift,tilt,travel,land=(ease(a,b) for a,b in ((0.,.25),(.25,.40),(.40,.60),(.60,.82),(.82,1.)))
+    center=(-.53+2.1*slide*(1.-travel),(.54+1.96*lift)*(1.-land)+.444*land,-2.625*(1.-travel))
+    return center,tilt*math.pi/2,.98+.52*tilt
+
+
+def exchange_view_distance(distance,progress):
+    if progress<0:return distance
+    def ease(value):
+        t=max(0.,min(1.,value));return t*t*(3.-2.*t)
+    weight=ease(progress/.25)*(1.-ease((progress-.82)/.18))
+    return distance+(max(distance,20.)-distance)*weight
+
+
+def track_menu_text(number,title,track,width,measure):
+    suffix=(' ★' if track.get('highlighted') else '')+(' ✓' if track.get('selected') else '')
+    text=f'{number:02}  {title}'
+    if measure(text+suffix)>width:
+        while text and measure(text+'…'+suffix)>width:text=text[:-1]
+        text+='…'
+    return text+suffix
+
+
+def view_ray(x,y,width,height,eye=None):
     # Same perspective camera as the shader. Intersect the top plate for picking.
     def norm(v):
         length=math.sqrt(sum(a*a for a in v));return tuple(a/length for a in v)
@@ -82,9 +107,31 @@ def deck_point(x,y,width,height,eye=None,plane=.32):
     unit=max(1,min(height,width/1.5))
     u=(x-width/2)/unit;v=(height/2-y)/unit
     ray=norm(tuple(fw[i]*2.5+rt[i]*u+up[i]*v for i in range(3)))
+    return eye,ray
+
+
+def deck_point(x,y,width,height,eye=None,plane=.32):
+    eye,ray=view_ray(x,y,width,height,eye)
     if ray[1]>=0:return None
     t=(plane-eye[1])/ray[1]
     return eye[0]+ray[0]*t,eye[2]+ray[2]*t
+
+
+def pending_disc_hit(x,y,width,height,eye):
+    eye,ray=view_ray(x,y,width,height,eye)
+    if abs(ray[2])<1e-6:return False
+    distance=(-2.70-eye[2])/ray[2]
+    if distance<=0:return False
+    px,py=eye[0]+distance*ray[0],eye[1]+distance*ray[1]
+    if abs(px+.53)>1.0 or abs(py-.54)>1.0:return False
+    if ray[1]<0:
+        for height_plane in (.46,.32):
+            t=(height_plane-eye[1])/ray[1]
+            if 0<t<distance:
+                qx,qz=eye[0]+t*ray[0],eye[2]+t*ray[2]
+                if height_plane==.46 and math.hypot(qx+.53,qz)<1.67:return False
+                if height_plane==.32 and abs(qx)<2.27 and abs(qz)<1.77:return False
+    return True
 
 
 def power_hit(x,y,width,height,eye):
@@ -159,8 +206,11 @@ def create_view(master,player,on_error):
     from PIL import Image,ImageTk,ImageDraw
     class View(tk.Canvas):
         def __init__(self):
-            super().__init__(master,bg='#12151a',highlightthickness=0)
-            self.scratch=None;self.scratch_job=None
+            super().__init__(master.winfo_toplevel(),bg='#12151a',highlightthickness=0)
+            self.home_host=master;self.mounted_context=None;self.fullscreen_widgets=[];self.previous_fullscreen=False
+            self.swap_disc=None;self.swap_started=None
+            self.pending_disc=None;self.disc_generation=0;self.fullscreen=False;self.escape_binding=None
+            self.native=None;self.native_failed=False;self.overlay_key=None;self.scratch=None;self.scratch_job=None
             self.gestures=None;self.gesture_job=None
             self.player=player;self.resume_pending=False;self.resume_generation=0;self.needle_ready=False;self.client=None;self.pending=False;self.job=None
             self.strobe=[0.,0.,0.,0.];self.angle=0.;self.arm=0.;self.velocity=0.;self.groove=0.;self.identity='';self.continuous_target=None;self.transition=0.;self.lamp=1.;self.lamp_target=1.;self.lift=0.;self.pitch=0.;self.rpm=100/3
@@ -180,6 +230,7 @@ def create_view(master,player,on_error):
                 self.tk.call('bind',self._w,'<TouchpadScroll>',callback+' %D %x %y; break')
             except tk.TclError:self.deletecommand(callback)
             if sys.platform=='darwin':self.bind('<Map>',self.gesture_mapped,add='+')
+            self.escape_binding=self.winfo_toplevel().bind('<Escape>',self.exit_fullscreen,add='+')
             self.bind('<Destroy>',lambda e:self.close() if e.widget is self else None)
         def gesture_mapped(self,event):
             if event.widget is self and self.gestures is None and self.gesture_job is None:
@@ -199,27 +250,110 @@ def create_view(master,player,on_error):
         def native_scroll(self,dx,dy,x,y):
             from types import SimpleNamespace
             if dy:self.wheel(SimpleNamespace(x=x,y=y),dy/30.)
+        def sync_playing_view(self):
+            p=self.player
+            if p.playback_state!='playing' or not p.folder or not p.current_track_id:return
+            try:identity=p.current_track_id.relative_to(p.folder).as_posix()
+            except ValueError:return
+            progress,matched=album_progress(p.album or {},identity,p.position.get(),p.duration)
+            if not matched:return
+            self.power=True;self.identity=identity;self.groove=progress;self.arm=1.
+            self.lift=0.;self.motion_lift=0.;self.transition=0.;self.clip=0.
+            self.head_drag=None;self.continuous_target=None;self.needle_ready=True
+            self.swap_disc=None;self.swap_started=None;self.cancel_audio()
+            self.velocity=self.rpm*(1+self.pitch*.08)
+            # Discard an old in-flight frame from before the view was hidden.
+            if self.client and self.pending:
+                self.client.close();self.client=None;self.pending=False
+            self.frame=None;self.delete('scene');self.overlay_key=None
         def show(self):
+            if not self.active:self.sync_playing_view()
             self.active=True;self.last=time.monotonic();self.requested_at=time.monotonic()
-            if not self.client:self.client=RenderClient()
+            if sys.platform=='darwin' and os.environ.get('CRATELOG_TURNTABLE_RENDERER')!='compat' and self.native is None and not self.native_failed:
+                try:
+                    from cratelog_turntable_native import NativeTurntable
+                    self.native=NativeTurntable(self);self.overlay_key=None
+                except (OSError,RuntimeError,AttributeError) as error:
+                    self.native_failed=True
+                    self.player.status.set('唱机使用兼容渲染：'+str(error))
+            if not self.native and not self.client:self.client=RenderClient()
             if self.job is None:self.tick()
+        def toggle_fullscreen(self):
+            if self.fullscreen:self.exit_fullscreen();return
+            root=self.winfo_toplevel()
+            self.previous_fullscreen=bool(root.attributes('-fullscreen'))
+            self.pack_forget()
+            self.fullscreen_widgets=list(root.grid_slaves())
+            for widget in self.fullscreen_widgets:widget.grid_remove()
+            self.fullscreen=True
+            self.place(x=0,y=0,relwidth=1,relheight=1)
+            self.tk.call('raise',self._w)
+            root.attributes('-fullscreen',True)
+            self.overlay_key=None;self.paint_overlay()
+        def exit_fullscreen(self,event=None):
+            if self.fullscreen:
+                self.fullscreen=False;self.place_forget()
+                for widget in self.fullscreen_widgets:
+                    if widget.winfo_exists():widget.grid()
+                self.fullscreen_widgets=[]
+                self.pack(in_=self.home_host,fill='both',expand=True)
+                self.winfo_toplevel().attributes('-fullscreen',self.previous_fullscreen)
+                self.overlay_key=None;self.paint_overlay()
+                return 'break'
+        def offer_folder(self,folder):
+            from cratelog_library import load_album,read_json
+            self.disc_generation+=1;generation=self.disc_generation;self.pending_disc=None
+            if folder==self.player.folder:return
+            self.player.status.set('正在准备待换唱片：'+folder.name)
+            recursive=True if self.player.remote_catalog.lookup(folder,read_json(folder/'.cratelog.json',{})) else None
+            def ready(album):
+                if generation!=self.disc_generation or not self.winfo_exists():return
+                if not album.get('tracks'):
+                    self.player.status.set('此文件夹没有可播放曲目');return
+                self.pending_disc=(folder,album);self.overlay_key=None
+                self.player.status.set('点击唱机后方的唱片换盘：'+folder.name)
+            self.player.submit(lambda:load_album(folder,recursive=recursive),ready)
+        def accept_disc(self):
+            if self.pending_disc is None or self.swap_disc is not None:return
+            self.swap_disc=self.pending_disc;self.swap_started=None
+            self.disc_generation+=1;self.pending_disc=None;self.overlay_key=None
+            self.head_drag=None;self.lift=0.;self.player.stop()
+        def update_exchange(self,now):
+            if self.swap_disc is None:return -1.
+            if self.swap_started is None:
+                if self.arm!=0. or self.motion_lift!=0.:return 0.
+                self.swap_started=now
+            progress=min(1.,max(0.,(now-self.swap_started)/2.4))
+            if progress>=1.:
+                folder,album=self.swap_disc;self.swap_disc=None;self.swap_started=None;self.angle=0.
+                self.player.load_folder(folder,autoplay=self.power,prepared=album)
+                return -1.
+            return progress
         def defer_audio(self):
             self.resume_generation+=1;self.resume_pending=True;self.needle_ready=False
         def cancel_audio(self):
             self.resume_generation+=1;self.resume_pending=False
         def hide(self):
+            if self.active and self.player.album:self.mounted_context=(self.player.folder,self.player.album)
+            self.exit_fullscreen()
             self.end_scratch()
             if self.gesture_job is not None:self.after_cancel(self.gesture_job);self.gesture_job=None
             if self.gestures:self.gestures.close();self.gestures=None
             self.active=False
+            if self.native:self.native.geometry(False)
             if self.resume_pending:
                 self.cancel_audio()
                 if self.player.playback_state!='stopped':self.player.set_paused(False)
             if self.job:self.after_cancel(self.job);self.job=None
         def close(self):
+            self.disc_generation+=1
+            if self.escape_binding:
+                self.winfo_toplevel().unbind('<Escape>',self.escape_binding);self.escape_binding=None
             self.hide()
+            if self.native:self.native.close();self.native=None
             if self.client:self.client.close();self.client=None
         def state(self):
+            swap_progress=self.update_exchange(time.monotonic())
             p=self.player;album=p.album or {};identity=''
             if p.folder and p.current_track_id:
                 try:identity=p.current_track_id.relative_to(p.folder).as_posix()
@@ -253,7 +387,15 @@ def create_view(master,player,on_error):
             images=album.get('images',[])
             cover=str(p.folder/images[0]['filename']) if p.folder and images else ''
             self.needle_ready=target==1. and self.arm==1. and self.motion_lift==0. and self.lift==0. and travelling==0. and self.head_drag is None
-            return dict(eye=camera_eye(self.yaw,self.elevation,self.distance),width=max(2,int(w*scale)),height=max(2,int(h*scale)),rotation=self.angle,strobe=self.strobe,velocity=self.velocity,
+            pending_cover='';pending_title='';pending_artist=''
+            offered=self.swap_disc or self.pending_disc
+            if offered:
+                folder,album=offered;images=album.get('images',[])
+                if images:pending_cover=str(folder/images[0]['filename'])
+                metadata=album.get('metadata',{})
+                pending_title=str(metadata.get('专辑名') or folder.name);pending_artist=str(metadata.get('音乐人') or '')
+            exchange_center,exchange_angle,exchange_radius=exchange_pose(swap_progress)
+            return dict(exchange_center=exchange_center,exchange_angle=exchange_angle,exchange_radius=exchange_radius,pending_title=pending_title,pending_artist=pending_artist,pending_record=bool(offered),swap_progress=swap_progress,pending_cover=pending_cover,eye=camera_eye(self.yaw,self.elevation,exchange_view_distance(self.distance,swap_progress)),width=max(2,int(w*scale)),height=max(2,int(h*scale)),rotation=self.angle,strobe=self.strobe,velocity=self.velocity,
                         room_light=self.room_light,power=self.power,speed_mix=self.speed_mix,progress=self.groove,arm=self.arm,lift=needle_lift(self.lift,self.motion_lift,travelling),clip=self.clip,keys=tuple(max(0.,(self.key_until-time.monotonic())/.12) if i==self.key_index else 0. for i in range(3)),lamp=self.lamp,pitch=self.pitch,cover=cover)
         def tick(self):
             self.job=None
@@ -265,6 +407,12 @@ def create_view(master,player,on_error):
             if not self.winfo_viewable():
                 self.requested_at=now;self.last=now;self.job=self.after(200,self.tick);return
             try:
+                if self.native:
+                    state=self.state();self.paint_overlay()
+                    displayed=self.native.render(state)
+                    if displayed and self.resume_pending and self.needle_ready and self.power:
+                        self.cancel_audio();self.player.set_paused(False)
+                    self.job=self.after(33,self.tick);return
                 if self.pending:
                     frame=completed_frame(self.client.results,self.requested_at,now)
                     if frame is not None:
@@ -289,14 +437,27 @@ def create_view(master,player,on_error):
                 self.requested_at=now;self.last=now
                 self.job=self.after(100,self.tick);return
             except Exception as error:
+                if self.native:
+                    self.native.close();self.native=None;self.native_failed=True;self.overlay_key=None
+                    self.client=RenderClient();self.pending=False;self.last=now
+                    self.player.status.set('唱机已切换到兼容渲染：'+str(error))
+                    self.job=self.after(100,self.tick);return
                 self.close();on_error(str(error));return
             self.job=self.after(33,self.tick)
         def paint_overlay(self):
-            if self.frame is None:return
-            image=self.frame.convert('RGBA');w,h=image.size
+            if self.native:
+                w,h=max(1,self.winfo_width()),max(1,self.winfo_height())
+                key=(w,h,self.fullscreen,self.menu_open,self.menu_offset,self.pad_visible,self.room_light,self.rpm,self.pitch,
+                     self.cue_index,self.head_drag is not None,self.player.current_track_id,id(self.player.album),
+                     tuple((t.get('highlighted'),t.get('selected')) for t in (self.player.album or {}).get('tracks',[])) if self.menu_open else ())
+                if key==self.overlay_key:return
+                self.overlay_key=key;image=Image.new('RGBA',(w,h))
+            else:
+                if self.frame is None:return
+                image=self.frame.convert('RGBA');w,h=image.size
             overlay=Image.new('RGBA',image.size);draw=ImageDraw.Draw(overlay)
             self.delete('hud');self.hits=[]
-            texts=[(16,h-22,f'{self.rpm:.2f} RPM   {self.pitch*8:+.1f}%   ×{self.rpm/(100/3)*(1+self.pitch*.08):.3f}','#b7c3d1')]
+            texts=[(52,h-22,f'{self.rpm:.2f} RPM   {self.pitch*8:+.1f}%   ×{self.rpm/(100/3)*(1+self.pitch*.08):.3f}','#b7c3d1')]
             if self.menu_open:
                 tracks=(self.player.album or {}).get('tracks',[])
                 count=max(1,min(12,(h-134)//28));self.menu_count=count
@@ -311,12 +472,9 @@ def create_view(master,player,on_error):
                     source=self.player.album.get('_track_sources',{}).get(track['filename'],{})
                     info=self.player.album.get('_durations',{}).get(track['filename'],{})
                     title=source.get('title') or info.get('title') or track['filename']
-                    text=f"{index+1:02}  {title}"
                     import tkinter.font as tkfont
                     font=tkfont.Font(self,font=('TkDefaultFont',11))
-                    if font.measure(text)>width-35:
-                        while text and font.measure(text+'…')>width-35:text=text[:-1]
-                        text+='…'
+                    text=track_menu_text(index+1,title,track,width-35,font.measure)
                     active=index==self.cue_index if self.head_drag is not None else self.player.current_track_id==self.player.folder/track['filename']
                     if active:draw.rounded_rectangle((left+4,y-12,right-4,y+12),5,fill=(255,166,77,40))
                     texts.append((left+14,y,text,'#ffb66b' if active else '#edf0f5'))
@@ -335,6 +493,19 @@ def create_view(master,player,on_error):
                 for line in [(58,13,58,15),(50,16,52,18),(64,18,66,16),(49,22,51,22),(65,22,67,22)]:draw.line(line,fill=bulb,width=1)
             else:draw.line((51,30,65,16),fill=bulb,width=1)
             self.hits.append(((44,6,76,40),('lighting','toggle')))
+            cx,cy=25,h-23
+            for sx,sy in ((-1,-1),(1,-1),(-1,1),(1,1)):
+                radius=3 if self.fullscreen else 8
+                xx,yy=cx+sx*radius,cy+sy*radius
+                direction=1 if self.fullscreen else -1
+                draw.rectangle((min(xx,xx+sx*direction*5),yy,max(xx,xx+sx*direction*5)+1,yy+1),fill='#e9eef5')
+                draw.rectangle((xx,min(yy,yy+sy*direction*5),xx+1,max(yy,yy+sy*direction*5)+1),fill='#e9eef5')
+            self.hits.append(((8,h-42,42,h-5),('fullscreen','toggle')))
+
+            if self.native:
+                overlay.alpha_composite(ImageTk.getimage(self.menu_icon),(16,14))
+                overlay=overlay.resize((w*2,h*2),Image.Resampling.LANCZOS)
+                self.native.hud(overlay,texts);return
             self.photo=ImageTk.PhotoImage(Image.alpha_composite(image,overlay))
             if not self.find_withtag('scene'):self.create_image(0,0,anchor='nw',image=self.photo,tags='scene')
             else:self.itemconfigure('scene',image=self.photo)
@@ -450,7 +621,8 @@ def create_view(master,player,on_error):
         def click(self,event):
             for (x1,y1,x2,y2),(kind,value) in self.hits:
                 if x1<=event.x<=x2 and y1<=event.y<=y2:
-                    if kind=='lighting':
+                    if kind=='fullscreen':self.toggle_fullscreen()
+                    elif kind=='lighting':
                         self.room_light=not self.room_light;self.paint_overlay()
                     elif kind=='track':
                         self.play_track(value)
@@ -461,6 +633,9 @@ def create_view(master,player,on_error):
                     elif value=='down':self.elevation=max(.18,self.elevation-.10)
                     return 'break'
             if self.in_menu(event):return 'break'
+            if self.swap_disc is not None:return 'break'
+            if self.pending_disc and pending_disc_hit(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance)):
+                self.accept_disc();return 'break'
             point=deck_point(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance))
             p=self.player
             if power_hit(event.x,event.y,self.winfo_width(),self.winfo_height(),camera_eye(self.yaw,self.elevation,self.distance)):
@@ -520,6 +695,54 @@ def create_view(master,player,on_error):
     return View()
 
 
+def sleeve_image(path):
+    from PIL import Image,ImageOps
+    try:
+        with Image.open(path) as source:return ImageOps.fit(ImageOps.exif_transpose(source).convert('RGBA'),(512,512))
+    except (OSError,ValueError):
+        background=Image.new('RGBA',(512,512),'#202428')
+        logo_path=Path(__file__).resolve().parent/'web/assets/cratelog.png'
+        try:
+            with Image.open(logo_path) as source:logo=ImageOps.contain(source.convert('RGBA'),(384,384))
+            background.alpha_composite(logo,((512-logo.width)//2,(512-logo.height)//2))
+        except (OSError,ValueError):pass
+        return background
+
+
+def sleeve_spine_image(title,artist):
+    from PIL import Image,ImageDraw,ImageFont
+    image=Image.new('RGBA',(1024,64),'#d6d0bd');draw=ImageDraw.Draw(image)
+    def font(bold):
+        candidates=(('C:/Windows/Fonts/msyhbd.ttc' if bold else 'C:/Windows/Fonts/msyhl.ttc'),
+                    ('DejaVuSans-Bold.ttf' if bold else 'DejaVuSans.ttf'),
+                    '/System/Library/Fonts/STHeiti Light.ttc')
+        for path in candidates:
+            try:return ImageFont.truetype(path,22)
+            except OSError:pass
+        return ImageFont.load_default(size=22)
+    for x,text,bold,width in ((16,title,True,580 if artist else 992),(620,artist,False,388)):
+        face=font(bold)
+        if draw.textlength(text,font=face)>width:
+            while text and draw.textlength(text+'…',font=face)>width:text=text[:-1]
+            text+='…'
+        draw.text((x,32),text,font=face,fill='#242424',anchor='lm')
+    return image
+
+
+def panel_image():
+    from PIL import Image,ImageDraw,ImageFont
+    panel=Image.new('RGBA',(1359,1059));draw=ImageDraw.Draw(panel)
+    try:font=ImageFont.truetype('DejaVuSans.ttf',20)
+    except OSError:font=ImageFont.load_default(size=20)
+    def label(x,z,text,size=font):draw.text(((x+2.265)*300,(z+1.765)*300),text,font=size,fill=(26,30,34,255))
+    label(.75,1.42,'CRATELOG');label(.75,1.52,'DIRECT DRIVE');label(-2.10,1.40,'START / STOP')
+    label(-1.50,1.51,'33');label(-1.23,1.51,'45');label(1.70,-.24,'PITCH');label(1.73,1.42,'RESET');label(1.64,-.06,'-8');label(1.64,1.02,'+8')
+    for i in range(-4,5):
+        z=.52+i*.135
+        draw.line([(1190,(z+1.765)*300),(1205,(z+1.765)*300)],fill=(20,20,20,255),width=2)
+    return panel
+
+
 def worker():
     from PIL import Image,ImageDraw,ImageFont,ImageOps
     import pyglet
@@ -536,16 +759,10 @@ def worker():
     def texture(image):
         data=pyglet.image.ImageData(image.width,image.height,'RGBA',image.tobytes(),pitch=-image.width*4)
         return data.get_texture()
-    panel=Image.new('RGBA',(1359,1059));draw=ImageDraw.Draw(panel)
-    try:font=ImageFont.truetype('DejaVuSans.ttf',20)
-    except OSError:font=ImageFont.load_default(size=20)
-    def label(x,z,text,size=font):draw.text(((x+2.265)*300,(z+1.765)*300),text,font=size,fill=(26,30,34,255))
-    label(.75,1.42,'CRATELOG');label(.75,1.52,'DIRECT DRIVE');label(-2.10,1.40,'START / STOP')
-    label(-1.50,1.51,'33');label(-1.23,1.51,'45');label(1.70,-.24,'PITCH');label(1.73,1.42,'RESET');label(1.64,-.06,'-8');label(1.64,1.02,'+8')
-    for i in range(-4,5):
-        z=.52+i*.135
-        draw.line([(1190,(z+1.765)*300),(1205,(z+1.765)*300)],fill=(20,20,20,255),width=2)
+    panel=panel_image()
     panel_tex=texture(panel);cover_tex=texture(Image.new('RGBA',(256,256),'#bd692d'));last_cover=None
+    pending_tex=texture(Image.new('RGBA',(256,256),'#bd692d'));last_pending=None
+    spine_tex=texture(sleeve_spine_image('',''));last_spine=None
     # A dedicated FBO avoids hidden-window/Retina framebuffer sizing differences.
     fbo=gl.GLuint();gl.glGenFramebuffers(1,fbo);gl.glBindFramebuffer(gl.GL_FRAMEBUFFER,fbo)
     output=gl.GLuint();gl.glGenTextures(1,output);last_size=None
@@ -565,7 +782,20 @@ def worker():
                 with Image.open(state['cover']) as image:cover_image=ImageOps.fit(ImageOps.exif_transpose(image).convert('RGBA'),(512,512))
             except (OSError,ValueError):cover_image=Image.new('RGBA',(512,512),'#bd692d')
             cover_tex=texture(cover_image);last_cover=state['cover']
+        if state.get('pending_cover','')!=last_pending:
+            pending_tex.delete()
+            pending_image=sleeve_image(state.get('pending_cover',''))
+            pending_tex=texture(pending_image);last_pending=state.get('pending_cover','')
+        spine=(state.get('pending_title',''),state.get('pending_artist',''))
+        if spine!=last_spine:
+            spine_tex.delete();spine_tex=texture(sleeve_spine_image(*spine));last_spine=spine
         gl.glViewport(0,0,w,h);program.use()
+        program['pending_record']=float(state.get('pending_record',False))
+        program['swap_progress']=float(state.get('swap_progress',-1.))
+        center,angle,radius=exchange_pose(state.get('swap_progress',-1.))
+        program['exchange_center']=center;program['exchange_angle']=angle;program['exchange_radius']=radius
+        gl.glActiveTexture(gl.GL_TEXTURE3);gl.glBindTexture(pending_tex.target,pending_tex.id);program['pending_cover']=3
+        gl.glActiveTexture(gl.GL_TEXTURE4);gl.glBindTexture(spine_tex.target,spine_tex.id);program['pending_spine']=4
         program['resolution']=(w,h)
         program['eye']=tuple(state.get('eye',(6.6,7.4,8.4)))
         for key in ('rotation','lamp','pitch'):program[key]=float(state[key])

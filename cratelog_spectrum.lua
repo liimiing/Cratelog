@@ -4,6 +4,7 @@ local mp = require 'mp'
 local overlay = mp.create_osd_overlay('ass-events')
 local active, dragging, preview = false, false, nil
 local last_seek = nil
+local last_visual = nil
 local range_start, range_end = 0, -1
 local function track_duration()
     local total = mp.get_property_number('duration', 0)
@@ -14,11 +15,15 @@ local function draw()
     local w, h = mp.get_osd_size()
     local duration = track_duration()
     if not active or not w or w < 1 or h < 1 or duration <= 0 then
-        overlay:remove()
+        if last_visual then overlay:remove(); last_visual = nil end
         return
     end
     local position = preview or (mp.get_property_number('time-pos', 0) - range_start)
     local x = math.floor(w * math.max(0, math.min(1, position / duration)))
+    -- Do not invalidate the VO for subpixel motion or unchanged clock text.
+    local visual = string.format('%d:%d:%d:%d:%d', w, h, x, math.floor(math.max(0,position)), math.floor(duration))
+    if visual == last_visual then return end
+    last_visual = visual
     overlay.res_x, overlay.res_y = w, h
     -- Alpha D2 keeps the fill dark and preserves the spectrum's readability.
     overlay.data = string.format(
@@ -88,7 +93,7 @@ mp.register_script_message('cratelog-range', function(first, last)
 end)
 mp.register_event('end-file', function()
     active, dragging, preview, last_seek = false, false, nil, nil
-    overlay:remove()
+    overlay:remove(); last_visual = nil
 end)
 for _, name in ipairs({'time-pos', 'duration', 'osd-dimensions'}) do
     mp.observe_property(name, 'native', draw)

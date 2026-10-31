@@ -23,7 +23,8 @@ const char *cratelog_source_sha256(void) { return CRATELOG_SOURCE_SHA256; }
     mpv_handle *player;
     mpv_render_context *renderer;
     atomic_bool dirty;
-    uint64_t frames;
+    uint64_t frames, wakeups, skipped;
+    BOOL forceRedraw;
 }
 @property(strong) NSTimer *timer;
 - (void)shutdown;
@@ -47,6 +48,11 @@ static void updated(void *ctx) {
     [[self openGLContext] makeCurrentContext];
     NSRect pixels = [self convertRectToBacking:self.bounds];
     mpv_opengl_fbo fbo = {0, MAX(1, (int)pixels.size.width), MAX(1, (int)pixels.size.height), 0};
+    if(self.hidden || !self.window.visible || self.window.miniaturized){
+        int skip=1;
+        mpv_render_param skippedParams[]={{MPV_RENDER_PARAM_SKIP_RENDERING,&skip},{0}};
+        mpv_render_context_render(renderer,skippedParams);skipped++;return;
+    }
     int flip = 1, block = 0;
     mpv_render_param params[] = {
         {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
@@ -62,11 +68,11 @@ static void updated(void *ctx) {
 - (void)reshape {
     [super reshape];
     [[self openGLContext] update];
-    atomic_store(&dirty, true);
+    forceRedraw=YES;atomic_store(&dirty, true);
 }
 - (void)viewDidChangeBackingProperties {
     [super viewDidChangeBackingProperties];
-    atomic_store(&dirty, true);
+    forceRedraw=YES;atomic_store(&dirty, true);
 }
 - (void)shutdown {
     [self.timer invalidate]; self.timer = nil;
@@ -96,7 +102,7 @@ void *cratelog_create(void *parent, const char *options_json, char *error, size_
         if (!format || !view || !view.openGLContext) {
             snprintf(error, capacity, "Cannot create accelerated OpenGL 3.2 context"); return NULL;
         }
-        atomic_init(&view->dirty, true);
+        atomic_init(&view->dirty, true);view->forceRedraw=YES;
         // Tk anchors this fixed-height plot to the top. Cocoa uses bottom-origin
         // coordinates, so parent-height changes must move its bottom margin.
         // Fullscreen/titlebar transitions can resize Cocoa before Tk Configure.
@@ -169,9 +175,11 @@ void *cratelog_create(void *parent, const char *options_json, char *error, size_
             CratelogGLView *v = weakView;
             if (!v || !v->renderer) return;
             if (atomic_exchange(&v->dirty, false)) {
-                // Continue consuming frames even when minimized so VO cannot stall audio.
-                mpv_render_context_update(v->renderer);
-                [v drawRect:v.bounds];
+                v->wakeups++;
+                uint64_t flags=mpv_render_context_update(v->renderer);
+                BOOL redraw=v->forceRedraw;v->forceRedraw=NO;
+                // Wakeups also service control requests; not all carry a new frame.
+                if(redraw || (flags & MPV_RENDER_UPDATE_FRAME)) [v drawRect:v.bounds];
             }
         }];
         [[NSRunLoop mainRunLoop] addTimer:view.timer forMode:NSRunLoopCommonModes];
@@ -185,10 +193,14 @@ void cratelog_geometry(void *handle, double x, double y, double w, double h, int
     double bottom = parent.isFlipped ? y : parent.bounds.size.height-y-h;
     [view setFrame:NSMakeRect(x, bottom, MAX(1,w), MAX(1,h))];
     view.hidden = !visible;
-    atomic_store(&view->dirty, true);
+    view->forceRedraw=YES;atomic_store(&view->dirty, true);
 }
 uint64_t cratelog_frames(void *handle) {
     return ((__bridge CratelogGLView *)handle)->frames;
+}
+void cratelog_render_stats(void *handle,uint64_t *out){
+    CratelogGLView *v=(__bridge CratelogGLView *)handle;
+    out[0]=v->frames;out[1]=v->wakeups;out[2]=v->skipped;
 }
 // Diagnostic only: all coordinates are Cocoa points except backing dimensions.
 void cratelog_geometry_snapshot(void *handle, double *out) {

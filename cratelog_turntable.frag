@@ -9,6 +9,10 @@ uniform vec4 strobe_phase;
 uniform float velocity, speed_mix, power, room_light;
 uniform sampler2D cover;
 uniform sampler2D panel;
+uniform sampler2D pending_cover;
+uniform float pending_record, swap_progress, exchange_angle, exchange_radius;
+uniform vec3 exchange_center;
+uniform sampler2D pending_spine;
 uniform vec3 eye;
 float box(vec3 p,vec3 b){vec3 q=abs(p)-b;return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.);}
 float cyl(vec3 p,float r,float h){vec2 d=abs(vec2(length(p.xz),p.y))-vec2(r,h);return min(max(d.x,d.y),0.)+length(max(d,0.));}
@@ -34,8 +38,24 @@ vec2 pick(vec2 a,vec2 b){return a.x<b.x?a:b;}
 const vec2 spindle=vec2(-.53,0.);
 const vec2 pivotXZ=vec2(1.30,-1.128538878);
 vec3 bezier(vec3 a,vec3 b,vec3 c,vec3 d,float t){float v=1.-t;return v*v*v*a+3.*v*v*t*b+3.*v*t*t*c+t*t*t*d;}
+vec3 exchangeLocal(vec3 p){
+    vec3 q=p-exchange_center;float angle=exchange_angle;
+    q.yz=mat2(cos(angle),sin(angle),-sin(angle),cos(angle))*q.yz;
+    return q;
+}
 vec2 scene(vec3 p){
     vec2 d=vec2(p.y+.48,0.);
+    if(pending_record>.5){
+        vec3 sleeve=p-vec3(-.53,.54,-2.70);
+        d=pick(d,vec2(box(sleeve,vec3(1.,1.,.012)),14.));
+        if(swap_progress>0.){
+            vec3 disc=exchangeLocal(p);
+            float radius=exchange_radius;
+            float shape=max(cyl(disc.xzy,radius,.009),.028-length(disc.xy));
+            if(swap_progress<.25)shape=max(shape,.47-p.x);
+            d=pick(d,vec2(shape,15.));
+        }
+    }
     d=pick(d,vec2(box(p-vec3(0,.01,0),vec3(2.215,.16,1.715))-.05,1.));
     d=pick(d,vec2(box(p-vec3(0,.22,0),vec3(2.235,.07,1.735))-.03,2.));
     for(int x=-1;x<=1;x+=2)for(int z=-1;z<=1;z+=2)
@@ -44,7 +64,7 @@ vec2 scene(vec3 p){
         d=pick(d,vec2(box(p-vec3(float(hinge)*1.48,.27,-1.80),vec3(.18,.09,.06)),3.));
     vec3 q=p-vec3(spindle.x,.36,spindle.y);
     d=pick(d,vec2(platter(q),12.));
-    d=pick(d,vec2(cyl(p-vec3(spindle.x,.444,spindle.y),1.50,.009),4.));
+    if(swap_progress<.60)d=pick(d,vec2(cyl(p-vec3(spindle.x,.444,spindle.y),1.50,.009),4.));
     d=pick(d,vec2(tube(p,vec3(spindle.x,.465,spindle.y),vec3(spindle.x,.515,spindle.y),.025),13.));
     // Low armboard, height-adjustment ring and open gimbal, not a tall pedestal.
     vec3 g=p-vec3(pivotXZ.x,.40,pivotXZ.y);
@@ -182,8 +202,22 @@ void main(){
         float diff=max(dot(n,l),0.),sh=shadow(p+n*.008,l),rough=.28;
         vec3 base=vec3(.09),em=vec3(0);
         float rimDots=-1.;
-        float id=hit.y>12.5?5.:(hit.y>11.5?3.:hit.y);
-        if(id<.5){base=vec3(.028,.034,.043);rough=.6;}
+        float id=hit.y>13.5?hit.y:(hit.y>12.5?5.:(hit.y>11.5?3.:hit.y));
+        if(id>14.5){
+            vec3 disc=exchangeLocal(p);float r=length(disc.xy);
+            base=vec3(.006+.002*sin(r*1200.)*exp(-max(fwidth(r)*1200.-1.,0.)));rough=.10;
+            float labelRadius=exchange_radius*.3266667;
+            if(r<labelRadius){base=texture(pending_cover,disc.xy/(2.*labelRadius)+.5).rgb;rough=.65;}
+        }
+        else if(id>13.5){
+            vec2 uv=(p.xy-vec2(-.53,.54))/2.0+.5;
+            if(abs(n.z)>.5)base=texture(pending_cover,uv).rgb;
+            else if(n.x<-.5)base=texture(pending_spine,vec2(1.-uv.y,clamp((p.z+2.712)/.024,0.,1.))).rgb;
+            else if(n.x>.5)base=vec3(.003);
+            else base=vec3(.16,.15,.14);
+            rough=.65;
+        }
+        else if(id<.5){base=vec3(.028,.034,.043);rough=.6;}
         else if(id<1.5){base=vec3(.022,.027,.033);rough=.34;}
         else if(id<2.5){base=vec3(.50,.53,.56)*(1.+.012*sin(p.x*850.)*exp(-abs(dFdx(p.x)*850.)));rough=.25;
             if(n.y>.8){vec4 ink=texture(panel,vec2((p.x+2.265)/4.53,1.-(p.z+1.765)/3.53));base=mix(base,ink.rgb,ink.a);}}
@@ -229,7 +263,7 @@ void main(){
         if(id>3.5 && id<4.5 && length(p.xz-spindle)>.49 && n.y>.8){
             spec=vinylReflection(p,n,v)*3.0;
         }
-        if(hit.y>12.5){
+        if(hit.y>12.5 && hit.y<13.5){
             // Polished stainless spindle: neutral silver with crisp reflected lights.
             base=vec3(.78,.81,.84);
             vec3 reflection=reflect(-v,n);

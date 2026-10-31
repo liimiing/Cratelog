@@ -43,8 +43,11 @@ def main():
             engine.command('set_property','volume',0)
             engine.command('loadfile',str(path),'replace')
             pump(4)
+            cpu_start=time.process_time();wall_start=time.monotonic()
             start=engine.process.frame_count();pump(2)
             count=engine.process.frame_count()-start
+            print("频谱进程 CPU（含 libmpv）：%.1f%%" % (100*(time.process_time()-cpu_start)/(time.monotonic()-wall_start)))
+            print("渲染统计：",engine.process.render_stats())
             assert count>=20,f'原生频谱输出过慢：2 秒只有 {count} 帧'
             assert progress[0]>1,'播放时钟未推进'
             engine.command('set_property','pause',True);pump(.6)
@@ -53,7 +56,10 @@ def main():
             engine.command('seek',10,'absolute+exact');pump(.6)
             assert abs(progress[0]-10)<.5,'暂停时跳转失败'
             root.geometry('1100x240');pump(.3)
-            root.iconify();pump(.3);root.deiconify();pump(.3)
+            root.iconify();pump(.5)
+            frames_hidden=engine.process.frame_count();pump(.5)
+            assert engine.process.frame_count()==frames_hidden,'最小化后仍在进行 GPU 呈现'
+            root.deiconify();pump(.3)
             engine.command('set_property','pause',False);pump(1.5)
             assert progress[0]>10.5,'恢复播放失败'
             engine.close();engine=None

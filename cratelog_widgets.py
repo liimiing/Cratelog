@@ -288,7 +288,10 @@ SPECTRUM_FILTER = (
     'showfreqs=s=1200x360:rate=30:mode=bar:ascale=log:fscale=log:'
     'win_size=4096:win_func=hann:averaging=2:colors=0xff9c38|0xff6128,'
     'crop=1200:180:0:0,'
-    'format=yuv420p[vo]'
+    # Keep spectrum in packed RGB; discard transparent background without
+    # CPU RGB->YUV conversion and
+    # a second color conversion in the GPU renderer. Audio branch is untouched.
+    'format=rgb0[vo]'
 )
 
 

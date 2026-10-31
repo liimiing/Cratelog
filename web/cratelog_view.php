@@ -26,16 +26,23 @@ function short_comment(string $text): string {
     return implode('',array_slice($characters[0],0,30));
 }
 function markdown_inline(string $text): string {
-    $parts=preg_split('/(`[^`]+`)/u',$text,-1,PREG_SPLIT_DELIM_CAPTURE);
-    return implode('',array_map(function($part) {
+    // Tokenize math before Markdown so TeX brackets and asterisks remain literal.
+    $pattern='~(`[^`]+`|(?<!\\\\)\$\$(?:\\\\.|[^$])*?\$\$|(?<!\\\\)\$(?!\s)(?:\\\\.|[^$\n])+?\$|\\\\\(.+?\\\\\)|\\\\\[.+?\\\\\])~su';
+    $parts=preg_split($pattern,$text,-1,PREG_SPLIT_DELIM_CAPTURE);
+    return implode('',array_map(function($part,$index) {
         if (str_starts_with($part,'`') && str_ends_with($part,'`')) return '<code>'.esc(substr($part,1,-1)).'</code>';
+        if ($index%2===1 && preg_match('~^(\$\$|\$|\\\\\(|\\\\\[)~',$part,$math)) {
+            $delimiter=$math[1];$length=strlen($delimiter);
+            $display=$delimiter==='$$' || $delimiter==='\\[';
+            return '<span class="markdown-math" data-display="'.($display?'true':'false').'">'.esc(substr($part,$length,-$length)).'</span>';
+        }
         $part=esc($part);
         $part=preg_replace('/&lt;br\s*\/?&gt;/i','<br>',$part);
         $part=preg_replace('/\*\*([^*]+)\*\*/u','<strong>$1</strong>',$part);
         return preg_replace_callback('/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/u',function($m) {
             return '<a href="'.$m[2].'" target="_blank" rel="noopener noreferrer">'.$m[1].'</a>';
         },$part);
-    },$parts));
+    },$parts,array_keys($parts)));
 }
 function markdown_cells(string $line): array {
     $line=trim($line);
@@ -73,7 +80,7 @@ function markdown_table(array $headers,array $align,array $rows): string {
 }
 function markdown_document(string $text): string {
     $text=preg_replace('/^\xEF\xBB\xBF/','',$text);
-    $html='';$code=false;$lines=[];$paragraph=[];$list=false;
+    $html='';$code=false;$lines=[];$paragraph=[];$list='';
     $flush=function() use (&$html,&$paragraph) {
         if ($paragraph) {$html.='<p>'.markdown_inline(implode("\n",$paragraph)).'</p>'; $paragraph=[];}
     };
@@ -81,7 +88,7 @@ function markdown_document(string $text): string {
     for ($n=0;$n<count($input);$n++) {
         $line=$input[$n];
         if (preg_match('/^\s*```/',$line)) {
-            $flush(); if ($list) {$html.='</ul>'; $list=false;}
+            $flush(); if ($list) {$html.='</'.$list.'>'; $list='';}
             if ($code) {$html.='<pre><code>'.esc(implode("\n",$lines)).'</code></pre>'; $lines=[];}
             $code=!$code;continue;
         }
@@ -90,7 +97,7 @@ function markdown_document(string $text): string {
             $headers=markdown_cells($line);$separators=markdown_cells($input[$n+1]);
             if (count($headers)===count($separators) && count($headers)>1 &&
                 count(array_filter($separators,fn($cell)=>preg_match('/^:?-{3,}:?$/',$cell)))===count($headers)) {
-                $flush();if ($list) {$html.='</ul>';$list=false;}
+                $flush();if ($list) {$html.='</'.$list.'>';$list='';}
                 $align=array_map(fn($cell)=>str_starts_with($cell,':') && str_ends_with($cell,':')?'center':(str_ends_with($cell,':')?'right':'left'),$separators);
                 $rows=[];$n++;
                 while (isset($input[$n+1]) && str_contains($input[$n+1],'|')) {
@@ -110,11 +117,13 @@ function markdown_document(string $text): string {
             }
         }
 
-        if (preg_match('/^\s*[-*+]\s+(.+)$/u',$line,$m)) {
-            $flush();if (!$list) {$html.='<ul>'; $list=true;}
-            $html.='<li>'.markdown_inline($m[1]).'</li>';continue;
+        if (preg_match('/^\s*(?:([-*+])|([0-9]+)[.)])\s+(.+)$/u',$line,$m)) {
+            $flush();$kind=$m[1]!==''?'ul':'ol';
+            if ($list && $list!==$kind) {$html.='</'.$list.'>';$list='';}
+            if (!$list) {$html.='<'.$kind.($kind==='ol'?' start="'.(int)$m[2].'"':'').'>';$list=$kind;}
+            $html.='<li>'.markdown_inline($m[3]).'</li>';continue;
         }
-        if ($list) {$html.='</ul>'; $list=false;}
+        if ($list) {$html.='</'.$list.'>'; $list='';}
         if (preg_match('/^(#{1,6})\s+(.+)$/u',$line,$m)) {
             $flush();$level=strlen($m[1]);$html.='<h'.$level.'>'.markdown_inline($m[2]).'</h'.$level.'>';
         } elseif (preg_match('/^>\s?(.*)$/u',$line,$m)) {
@@ -122,7 +131,7 @@ function markdown_document(string $text): string {
         } elseif (trim($line)==='') {$flush();}
         else {$paragraph[]=$line;}
     }
-    $flush();if ($list) $html.='</ul>';
+    $flush();if ($list) $html.='</'.$list.'>';
     if ($code) $html.='<pre><code>'.esc(implode("\n",$lines)).'</code></pre>';
     return $html;
 }

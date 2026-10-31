@@ -69,6 +69,11 @@ try {
                         header('Content-Type: text/html; charset=utf-8');
                         header("Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
                         echo '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>'.esc($document['filename']).'</title><style>body{background:#202428;color:#e5e5e5;font:16px/1.8 system-ui;padding:24px;overflow-wrap:anywhere}pre,p{white-space:pre-wrap}pre,code{background:#151719;padding:8px}a{color:#e9a65d}table{border-collapse:collapse;width:100%}td{border:1px solid #555;padding:8px}blockquote{border-left:3px solid #997046;padding-left:16px}</style>';
+                        if ($type==='md') {
+                            // Only our escaped Markdown output may run the local math renderer.
+                            header("Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src data:; img-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
+                            echo '<link rel="stylesheet" href="assets/katex/katex.min.css"><script defer src="assets/katex/katex.min.js"></script><script defer src="assets/markdown-math.js"></script>';
+                        }
                         echo readable_preview($document);
                         echo '<style>html,body{background:#fff!important;color:#222!important;color-scheme:light}body pre,body code{background:#f5f5f5;color:#222}body a{color:#175ca4}body td{border-color:#ccc}</style>';exit;
                     }
