@@ -2,6 +2,7 @@
 from cratelog_platform import ui_font
 import tkinter as tk
 import math
+import weakref
 from PIL import Image, ImageDraw, ImageTk
 
 SPECTRUM_HEIGHT = round((145 + 21) * .7)
@@ -250,7 +251,17 @@ def transport_icon(kind, width=88):
 
 
 class Tooltip:
+    instances = weakref.WeakSet()
+
+    @classmethod
+    def set_disabled(cls, root, disabled):
+        root._cratelog_tooltips_disabled = bool(disabled)
+        if disabled:
+            for tooltip in list(cls.instances):
+                if tooltip.widget._root() is root:tooltip.hide()
+
     def __init__(self, widget, text):
+        self.instances.add(self)
         self.widget, self.text, self.window, self.job = widget, text, None, None
         widget.bind('<Enter>', self.schedule, add='+')
         widget.bind('<Leave>', self.hide, add='+')
@@ -259,10 +270,12 @@ class Tooltip:
 
     def schedule(self, event=None):
         self.hide()
+        if getattr(self.widget._root(), '_cratelog_tooltips_disabled', False):return
         self.job = self.widget.after(500,self.show)
 
     def show(self):
         self.job = None
+        if getattr(self.widget._root(), '_cratelog_tooltips_disabled', False):return
         self.window = tk.Toplevel(self.widget)
         self.window.overrideredirect(True)
         self.window.configure(bg='#454e56')

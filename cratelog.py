@@ -7,7 +7,7 @@ Discogs 音乐专辑匹配器
 使用前请配置Discogs Token:
 1. 访问 https://www.discogs.com/settings/developers
 2. 生成Personal Access Token
-3. 在整理器设置中填写 Token；不要将凭据写入源码
+3. 在CratelogOrganizer类中找到DISCOGS_TOKEN变量，将Token填入
 """
 
 import os
@@ -373,7 +373,7 @@ class ModernMenu:
                                text=f"  {item['label']}  ", 
                                bg=self.bg, 
                                fg=self.fg,
-                               font=('Arial', 9),
+                               font=ttk.Style(self.root).lookup('TLabel', 'font') or 'TkDefaultFont',
                                anchor='w',
                                pady=6,
                                padx=10)
@@ -2817,9 +2817,6 @@ class CratelogOrganizer:
 
 
 def main():
-    if len(sys.argv)==3 and sys.argv[1]=='--self-test':
-        from cratelog_selftest import run
-        raise SystemExit(run(Path(sys.argv[2])))
     from cratelog_player import main as cratelog_main
     cratelog_main()
 

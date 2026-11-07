@@ -98,3 +98,14 @@ end)
 for _, name in ipairs({'time-pos', 'duration', 'osd-dimensions'}) do
     mp.observe_property(name, 'native', draw)
 end
+-- mpv expresses subtitle sizes relative to a 720px canvas. Keep the
+-- configured size readable in the short embedded spectrum panel.
+local function update_subtitle_scale()
+    local _, height = mp.get_osd_size()
+    if height and height > 0 then
+        mp.set_property_number('sub-scale', 720 / height)
+    end
+end
+mp.observe_property('osd-dimensions', 'native', update_subtitle_scale)
+mp.register_event('file-loaded', update_subtitle_scale)
+

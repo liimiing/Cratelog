@@ -49,7 +49,7 @@ def subtitle_style(raw):
     color = str(raw.get('color') or '').strip().upper()
     if re.fullmatch(r'[0-9A-F]{6}', color): color = '#' + color
     if not re.fullmatch(r'#[0-9A-F]{6}', color): color = '#FFFFFF'
-    return {'font': font, 'size': min(300, max(8, size)), 'color': color}
+    return {'font': font, 'size': min(300, max(8, size)), 'color': color, 'bold': raw.get('bold') is True}
 
 
 def parse_subtitle_form(font, size, color):
@@ -71,8 +71,9 @@ def subtitle_argv(raw):
     style = subtitle_style(raw)
     # exact sidecars are added after the file loads. Fuzzy names stay in the spectrum menu.
     return ['--sub-auto=no', '--sid=no',
-            '--sub-font=' + (style['font'] or 'sans-serif'),
+            '--sub-font=' + (style['font'] or UI_FONT),
             '--sub-font-size=' + str(style['size']),
+            '--sub-bold=' + ('yes' if style['bold'] else 'no'),
             '--sub-color=' + style['color']]
 
 
@@ -264,8 +265,9 @@ class MPV:
 class Player:
     def __init__(self, root):
         self.root = root
-        self.settings_path = state_dir() / 'cratelog_settings.json'
+        self.settings_path = (state_dir() if sys.platform=='darwin' else BASE) / 'cratelog_settings.json'
         self.settings = read_json(self.settings_path,{})
+        _BaseTooltip.set_disabled(root,self.settings.get('disable_tooltips',False))
         legacy=read_json(self.settings_path.parent/'config.json',{})
         language.set_language(self.settings.get('language',legacy.get('language','auto')))
         self.root.title(tr('Cratelog · 音乐资料库与播放器'))
@@ -347,6 +349,13 @@ class Player:
                             focuscolor='#e9b965')
             style.map(name,background=[('disabled','#292f34'),('pressed','#704a2c'),('active','#4b3b2d'),('!disabled','#30363c')],
                       foreground=[('disabled','#838b92'),('!disabled','#e7e7e7')])
+        style.configure('Cratelog.TCheckbutton',background='#202428',foreground='#e7e7e7',
+                        indicatorbackground='#30363c',indicatorforeground='#e9b965',
+                        bordercolor='#59636b',focuscolor='#e9b965')
+        style.map('Cratelog.TCheckbutton',
+                  background=[('active','#202428'),('!disabled','#202428')],
+                  foreground=[('disabled','#838b92'),('!disabled','#e7e7e7')],
+                  indicatorbackground=[('disabled','#292f34'),('pressed','#704a2c'),('active','#4b3b2d'),('!disabled','#30363c')])
         style.map('TCombobox', fieldbackground=[('readonly','#30363c')], foreground=[('readonly','#e7e7e7')], selectbackground=[('readonly','#30363c')], selectforeground=[('readonly','#e7e7e7')])
         style.configure('Treeview.Heading', background='#292f34', padding=7, borderwidth=0, font=(UI_FONT, 10))
         style.map('Treeview.Heading',background=[('active','#292f34'),('pressed','#292f34')],foreground=[('active','#e7e7e7'),('pressed','#e7e7e7')])
@@ -518,6 +527,8 @@ class Player:
         ratio=layout.get('split')
         if isinstance(ratio,(int,float)) and 0<ratio<1:
             self.library_pane.sashpos(0,round(self.library_pane.winfo_width()*ratio))
+        for pane,key in ((self.top_pane,'top_split'),(self.library_pane,'split')):
+            self.remember_pane_ratio(pane,key)
         widths=layout.get('columns',{})
         for key in self.tracks['columns']:
             if key in self.fixed_track_widths:continue
@@ -535,6 +546,27 @@ class Player:
         if self.tree.exists(str(folder)):
             self.tree.selection_set(str(folder));self.tree.focus(str(folder));self.tree.see(str(folder))
         self.load_folder(folder)
+
+    def remember_pane_ratio(self,pane,key):
+        """Keep both dividers proportional after late geometry requests and resizing."""
+        ratio=self.settings.get('layout',{}).get(key)
+        if not isinstance(ratio,(int,float)) or not 0<ratio<1:
+            ratio=pane.sashpos(0)/max(1,pane.winfo_width())
+        pane.saved_ratio=ratio
+        pane.ratio_job=None
+        def apply():
+            pane.ratio_job=None
+            if pane.winfo_exists():pane.sashpos(0,round(pane.winfo_width()*pane.saved_ratio))
+        def resized(event):
+            if pane.ratio_job is not None:pane.after_cancel(pane.ratio_job)
+            pane.ratio_job=pane.after_idle(apply)
+        def released(event):
+            if pane.ratio_job is not None:
+                pane.after_cancel(pane.ratio_job);pane.ratio_job=None
+            pane.saved_ratio=pane.sashpos(0)/max(1,pane.winfo_width())
+        pane.bind('<Configure>',resized,add='+')
+        pane.bind('<ButtonRelease-1>',released,add='+')
+        resized(None)
 
     def save_workspace(self):
         self.root.update_idletasks()
@@ -568,10 +600,12 @@ class Player:
     def track_menu(self,event):
         row=self.tracks.identify_row(event.y)
         if not row or not self.album:return 'break'
-        self.tracks.selection_set(row);self.tracks.focus(row)
-        menu=tk.Menu(self.root,tearoff=False,bg='#30363c',fg='#e7e7e7')
+        if row not in self.tracks.selection():self.tracks.selection_set(row)
+        self.tracks.focus(row)
+        selected=tuple(int(item) for item in self.tracks.selection())
+        menu=tk.Menu(self.root,tearoff=False,bg='#30363c',fg='#e7e7e7',font=(UI_FONT,10))
         menu.add_command(label=tr('复制曲名'),command=lambda:self.copy_track_info(int(row)))
-        menu.add_command(label=tr('编辑音频标签（ID3）'),command=lambda:self.edit_tags(int(row)))
+        menu.add_command(label=tr('编辑音频标签（ID3）'),command=lambda:self.edit_tags_batch(selected) if len(selected)>1 else self.edit_tags(int(row)))
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release()
         return 'break'
@@ -598,6 +632,82 @@ class Player:
         text='[::] '+ ' - '.join((artist,title,album))+' ['+', '.join((label,year))+']'
         self.root.clipboard_clear();self.root.clipboard_append(text)
         self.status.set(tr('已复制：')+text)
+
+    def edit_tags_batch(self,indices):
+        from cratelog_tags import FIELDS,read_tags,save_tags,stamp
+        album_folder=self.folder
+        keys=list(dict.fromkeys(self.album['tracks'][i]['filename'] for i in indices))
+        if any('#track=' in key for key in keys):
+            messagebox.showinfo(tr('编辑音频标签'),tr('批量标签编辑仅支持独立音频文件，请取消选择 CUE 曲目后重试。'),parent=self.root)
+            return
+        records=[]
+        try:
+            for key in keys:
+                path=album_folder/key
+                expected=stamp(path)
+                records.append((path,read_tags(path),expected))
+        except Exception as e:
+            messagebox.showerror(tr('读取标签失败'),str(e),parent=self.root);return
+        win=tk.Toplevel(self.root);win.title(tr('批量编辑音频标签'));win.configure(bg='#202428');win.transient(self.root)
+        win.geometry('700x560');win.columnconfigure(1,weight=1)
+        ttk.Label(win,text=tr('已选择')+f' {len(records)} '+tr('首曲目')+'\n'+tr('仅修改勾选的字段；勾选后留空表示清除。曲名和音轨编号保持不变。'),wraplength=650).grid(row=0,column=0,columnspan=3,padx=16,pady=16,sticky='w')
+        variables={};enabled={}
+        win.tag_variables=variables
+        win.tag_enabled=enabled
+        for row,(name,label) in enumerate(((k,l) for k,l in FIELDS if k not in ('title','tracknumber')),1):
+            values={original[name] for _,original,_ in records}
+            value=tk.StringVar(win,value=next(iter(values)) if len(values)==1 else '')
+            checked=tk.BooleanVar(win,value=False)
+            variables[name]=value;enabled[name]=checked
+            entry=ttk.Entry(win,textvariable=value,state='disabled')
+            ttk.Checkbutton(win,style='Cratelog.TCheckbutton',text=tr(label),variable=checked,command=lambda e=entry,c=checked:e.configure(state='normal' if c.get() else 'disabled')).grid(row=row,column=0,padx=16,pady=7,sticky='w')
+            entry.grid(row=row,column=1,sticky='ew',padx=8)
+            if len(values)>1:ttk.Label(win,text=tr('多个不同值')).grid(row=row,column=2,padx=12)
+        busy=False
+        def close():
+            if not busy:win.destroy()
+        win.protocol('WM_DELETE_WINDOW',close);win.bind('<Escape>',lambda e:close())
+        def save():
+            nonlocal busy
+            changes={k:v.get() for k,v in variables.items() if enabled[k].get()}
+            if not changes:return
+            if any(self.current_file==path for path,_,_ in records) and self.playback_state!='stopped':
+                messagebox.showinfo(tr('音频正在使用'),tr('请先停止该文件的播放，再保存标签。'),parent=win);return
+            busy=True;button.state(['disabled'])
+            def work():
+                from cratelog_tracks import read_audio_info
+                from cratelog_library import AudioMetadata
+                succeeded=[];errors=[]
+                for path,original,expected in records:
+                    try:
+                        save_tags(path,changes,original,expected)
+                    except Exception as e:
+                        errors.append(path.name+': '+str(e));continue
+                    try:info=read_audio_info(path,AudioMetadata)
+                    except Exception:info=None
+                    succeeded.append((path,info))
+                return succeeded,errors
+            def done(result):
+                nonlocal busy
+                succeeded,errors=result;busy=False
+                if self.folder==album_folder and self.album:
+                    durations=self.album.setdefault('_durations',{})
+                    for path,info in succeeded:
+                        relative=path.relative_to(album_folder).as_posix()
+                        if info is not None:
+                            durations[relative]=info
+                            for identity,source in self.album.get('_track_sources',{}).items():
+                                if source.get('file')!=relative:continue
+                                end=source.get('end') if source.get('end') is not None else info['seconds']
+                                durations[identity]={**info,'seconds':max(0,end-source.get('start',0)) if end is not None else None}
+                        else:durations.pop(relative,None)
+                    self.render()
+                self.status.set(tr('音频标签已保存：')+str(len(succeeded))+'/'+str(len(records)))
+                win.destroy()
+                if errors:messagebox.showerror(tr('部分标签保存失败'),'\n'.join(errors),parent=self.root)
+            self.submit(work,done)
+        button=ttk.Button(win,text=tr('保存'),style='Cratelog.TButton',command=save);button.grid(row=10,column=1,pady=18)
+        ttk.Button(win,text=tr('关闭'),style='Cratelog.TButton',command=close).grid(row=10,column=2,padx=12)
 
     def edit_tags(self,index):
         from cratelog_tags import FIELDS,read_tags,save_tags,stamp
@@ -685,31 +795,52 @@ class Player:
         win.configure(bg='#202428')
         win.transient(self.root)
         win.geometry('760x860+{0}+{1}'.format(max(0, self.root.winfo_rootx() + (self.root.winfo_width() - 760) // 2), max(0, self.root.winfo_rooty() + (self.root.winfo_height() - 860) // 2)))
-        win.resizable(True, False)
+        win.resizable(True, True)
         win.bind('<Escape>', lambda e: win.destroy())
+        # Reserve footer space before packing the scrollable settings content.
+        footer=ttk.Frame(win,padding=(18,12));footer.pack(side='bottom',fill='x')
+        viewport=ttk.Frame(win);viewport.pack(fill='both',expand=True)
+        canvas=tk.Canvas(viewport,bg='#202428',highlightthickness=0)
+        scrollbar=ttk.Scrollbar(viewport,orient='vertical',command=canvas.yview)
+        scrollbar.pack(side='right',fill='y');canvas.pack(side='left',fill='both',expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        body=ttk.Frame(canvas)
+        content=canvas.create_window(0,0,window=body,anchor='nw')
+        body.bind('<Configure>',lambda e:canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>',lambda e:canvas.itemconfigure(content,width=e.width))
+        height=min(860,max(300,win.winfo_screenheight()-100))
+        width=min(760,win.winfo_screenwidth())
+        x=max(0,min(win.winfo_screenwidth()-width,self.root.winfo_rootx()+(self.root.winfo_width()-width)//2))
+        win.geometry('{0}x{1}+{2}+{3}'.format(width,height,x,max(0,(win.winfo_screenheight()-height)//2-30)))
+        win.minsize(540,300)
         # Native Tk fields retain their palette even when the organizer changes
         # global ttk styles. Explicit cursor/selection colors stay readable.
         for label,var in [('同步 API（HTTPS）',self.url),('同步令牌（保存后长期有效）',self.token),('mpv 路径（可留空自动检测）',self.mpv)]:
-            tk.Label(win,text=tr(label),bg='#202428',fg='#e7e7e7').pack(anchor='w',padx=18,pady=(12,4))
-            tk.Entry(win,textvariable=var,show='*' if var is self.token else '',
+            tk.Label(body,text=tr(label),bg='#202428',fg='#e7e7e7').pack(anchor='w',padx=18,pady=(12,4))
+            tk.Entry(body,textvariable=var,show='*' if var is self.token else '',
                      bg='#30363c',fg='#e7e7e7',insertbackground='#ffe2aa',
                      selectbackground='#704a2c',selectforeground='#ffffff',relief='flat',
                      highlightthickness=1,highlightbackground='#454e56',highlightcolor='#e9a65d').pack(fill='x',padx=18,ipady=5)
         languages=language.get_available_languages()
         codes=[code for code,_ in languages]
         selected=self.settings.get('language',read_json(self.settings_path.parent/'config.json',{}).get('language','auto'))
-        ttk.Label(win,text=tr('界面语言')).pack(anchor='w',padx=18,pady=(12,4))
-        language_choice=ttk.Combobox(win,values=[name for _,name in languages],state='readonly')
+        ttk.Label(body,text=tr('界面语言')).pack(anchor='w',padx=18,pady=(12,4))
+        language_choice=ttk.Combobox(body,values=[name for _,name in languages],state='readonly')
         language_choice.current(codes.index(selected) if selected in codes else 0)
         language_choice.pack(fill='x',padx=18)
-        ttk.Label(win,text=tr('语言设置将在重启后应用')).pack(anchor='w',padx=18,pady=4)
-        self.subtitle_settings_panel(win)
-        self.lastfm_settings_panel(win)
+        ttk.Label(body,text=tr('语言设置将在重启后应用')).pack(anchor='w',padx=18,pady=4)
+        self.subtitle_settings_panel(body)
+        disable_tooltips=tk.BooleanVar(body,value=self.settings.get('disable_tooltips',False))
+        ttk.Checkbutton(body,style='Cratelog.TCheckbutton',text=tr('关闭控件气泡帮助提醒'),variable=disable_tooltips).pack(anchor='w',padx=18,pady=(10,0))
+        self.lastfm_settings_panel(body)
         def save():
             try: style=parse_subtitle_form(self.sub_font.get(),self.sub_size.get(),self.sub_color.get())
             except ValueError as e:
                 messagebox.showerror(tr('字幕设置'),tr(str(e)),parent=win);return
             if not self.save_lastfm_settings():return
+            style['bold']=self.sub_bold.get()
+            self.settings['disable_tooltips']=disable_tooltips.get()
+            _BaseTooltip.set_disabled(self.root,disable_tooltips.get())
             selected_language=codes[language_choice.current()]
             self.settings.update(url=self.url.get().strip(),mpv=self.mpv.get().strip(),token=self.token.get().strip(),language=selected_language,subtitle=style)
             self.apply_subtitle()
@@ -718,7 +849,8 @@ class Player:
             atomic_json(self.settings_path.parent/'config.json',config)
             if self.organizer:self.organizer.saved_language=selected_language
             atomic_json(self.settings_path,self.settings); win.destroy(); self.refresh_catalog()
-        ttk.Button(win,text=tr('保存'),command=save,style='Cratelog.TButton').pack(pady=16)
+        ttk.Button(footer,text=tr('取消'),command=win.destroy,style='Cratelog.TButton').pack(side='right',padx=(8,0))
+        ttk.Button(footer,text=tr('保存'),command=save,style='Cratelog.TButton').pack(side='right')
 
     def subtitle_settings_panel(self,win):
         style=subtitle_style(self.settings.get('subtitle'))
@@ -726,6 +858,8 @@ class Player:
         self.sub_font=tk.StringVar(value=style['font'])
         self.sub_size=tk.StringVar(value=str(style['size']))
         self.sub_color=tk.StringVar(value=style['color'])
+        self.sub_bold=tk.BooleanVar(value=style['bold'])
+        ttk.Checkbutton(panel,style='Cratelog.TCheckbutton',text=tr('字幕字体加粗'),variable=self.sub_bold).pack(anchor='w',pady=4)
         row=ttk.Frame(panel);row.pack(fill='x',pady=4)
         ttk.Label(row,text=tr('字幕字体'),width=12).pack(side='left')
         families=sorted({name for name in tkfont.families() if name and not name.startswith('@')},key=str.casefold)
@@ -749,13 +883,14 @@ class Player:
             chosen=colorchooser.askcolor(color=self.sub_color.get() or '#FFFFFF',parent=win,title=tr('字幕颜色'))
             if chosen and chosen[1]:self.sub_color.set(chosen[1].upper())
         ttk.Button(row,style='Cratelog.TButton',text=tr('选择颜色'),command=pick).pack(side='left')
-        ttk.Label(panel,text=tr('字体留空使用无衬线默认字体。字高以高度为 720 的画面为基准，频谱窗口较矮时会按比例缩小。'),wraplength=680).pack(anchor='w',pady=(4,0))
+        ttk.Label(panel,text=tr('字体留空使用界面默认字体。字高已适配频谱区域的显示尺寸。'),wraplength=680).pack(anchor='w',pady=(4,0))
 
     def apply_subtitle(self):
         style=subtitle_style(self.settings.get('subtitle'))
         if not self.engine or self.engine.process.poll() is not None:return
-        self.engine.command('set_property','sub-font',style['font'] or 'sans-serif')
+        self.engine.command('set_property','sub-font',style['font'] or UI_FONT)
         self.engine.command('set_property','sub-font-size',style['size'])
+        self.engine.command('set_property','sub-bold',style['bold'])
         self.engine.command('set_property','sub-color',style['color'])
 
     def lastfm_settings_panel(self,win):
@@ -764,7 +899,7 @@ class Player:
         self.lfm_secret=tk.StringVar(value=self.lastfm_config.get('secret',''))
         self.lfm_enabled=tk.BooleanVar(value=self.lastfm_config.get('enabled',False))
         self.lfm_status=tk.StringVar(value=tr('已授权：')+self.lastfm_config['username'] if self.lastfm_config.get('username') else tr('尚未授权'))
-        ttk.Checkbutton(panel,text=tr('启用 Last.fm（发送曲目资料，不上传音频）'),variable=self.lfm_enabled).pack(anchor='w')
+        ttk.Checkbutton(panel,style='Cratelog.TCheckbutton',text=tr('启用 Last.fm（发送曲目资料，不上传音频）'),variable=self.lfm_enabled).pack(anchor='w')
         for label,var,mask in [('API Key',self.lfm_key,''),('Shared Secret',self.lfm_secret,'*')]:
             row=ttk.Frame(panel);row.pack(fill='x',pady=4)
             ttk.Label(row,text=tr(label),width=15).pack(side='left');ttk.Entry(row,textvariable=var,show=mask).pack(side='left',fill='x',expand=True)
