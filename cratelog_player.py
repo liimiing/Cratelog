@@ -1707,7 +1707,7 @@ class Player:
     def update_track_tags(self, metadata):
         if not self.current_file:return
         tags={str(k).lower(): ' '.join(str(v).split()) for k,v in (metadata or {}).items() if v is not None} if isinstance(metadata,dict) else {}
-        if any('\ufffd' in value for value in tags.values()):
+        if tags:
             from cratelog_tags import read_tags
             try:
                 local=read_tags(self.current_file)
