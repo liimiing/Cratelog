@@ -466,7 +466,12 @@ class Player:
         self.tracks.bind('<Leave>',lambda event:self.tracks.configure(cursor=''),add='+')
         self.root.bind('<space>', self.space_next)
         self.tracks.bind('<Button-3>',self.track_menu)
-        self.root.bind('<Alt-Key-3>',self.edit_selected_tags,add='+')
+        if sys.platform=='darwin':
+            # Option changes the keysym itself (e.g. 3 becomes sterling or
+            # numbersign), so matching only the literal 3 misses the key.
+            self.root.bind('<Option-KeyPress>',self.option_tag_shortcut,add='+')
+        else:
+            self.root.bind('<Alt-Key-3>',self.edit_selected_tags,add='+')
         if sys.platform=='darwin':
             self.tracks.bind('<Button-2>',self.track_menu)
             self.tracks.bind('<Control-Button-1>',self.track_menu)
@@ -606,7 +611,7 @@ class Player:
         selected=tuple(int(item) for item in self.tracks.selection())
         menu=tk.Menu(self.root,tearoff=False,bg='#30363c',fg='#e7e7e7',font=(UI_FONT,10))
         menu.add_command(label=tr('复制曲名'),command=lambda:self.copy_track_info(int(row)))
-        menu.add_command(label=tr('编辑音频标签（ID3）'),accelerator='Alt+3',command=lambda:self.edit_tags_batch(selected) if len(selected)>1 else self.edit_tags(int(row)))
+        menu.add_command(label=tr('编辑音频标签（ID3）'),accelerator='Option+3' if sys.platform=='darwin' else 'Alt+3',command=lambda:self.edit_tags_batch(selected) if len(selected)>1 else self.edit_tags(int(row)))
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release()
         return 'break'
@@ -634,6 +639,10 @@ class Player:
         self.root.clipboard_clear();self.root.clipboard_append(text)
         self.status.set(tr('已复制：')+text)
 
+    def option_tag_shortcut(self,event):
+        if event.keysym in ('3','sterling','numbersign') or event.char in ('3','£','#'):
+            return self.edit_selected_tags(event)
+
     def edit_selected_tags(self,event=None):
         if self.root.grab_current() or (event is not None and event.widget.winfo_toplevel()!=self.root):return
         if not self.album:return
@@ -641,6 +650,16 @@ class Player:
         if len(selected)>1:self.edit_tags_batch(selected)
         elif selected:self.edit_tags(selected[0])
         return 'break'
+
+    def layout_tag_editor(self,win,width,height):
+        self.root.update_idletasks()
+        x=max(0,self.root.winfo_rootx()+(self.root.winfo_width()-width)//2)
+        y=max(0,self.root.winfo_rooty()+(self.root.winfo_height()-height)//2)
+        win.geometry(f'{width}x{height}+{x}+{y}')
+        win.minsize(width,height)
+        win.columnconfigure(0,minsize=165)
+        win.columnconfigure(1,weight=1)
+        win.columnconfigure(2,minsize=90)
 
     def edit_tags_batch(self,indices):
         from cratelog_tags import FIELDS,read_tags,save_tags,stamp
@@ -658,7 +677,7 @@ class Player:
         except Exception as e:
             messagebox.showerror(tr('读取标签失败'),str(e),parent=self.root);return
         win=tk.Toplevel(self.root);win.title(tr('批量编辑音频标签'));win.configure(bg='#202428');win.transient(self.root)
-        win.geometry('700x560');win.columnconfigure(1,weight=1)
+        self.layout_tag_editor(win,700,560)
         ttk.Label(win,text=tr('已选择')+f' {len(records)} '+tr('首曲目')+'\n'+tr('仅修改勾选的字段；勾选后留空表示清除。曲名和音轨编号保持不变。'),wraplength=650).grid(row=0,column=0,columnspan=3,padx=16,pady=16,sticky='w')
         variables={};enabled={}
         win.tag_variables=variables
@@ -668,9 +687,9 @@ class Player:
             value=tk.StringVar(win,value=next(iter(values)) if len(values)==1 else '')
             checked=tk.BooleanVar(win,value=False)
             variables[name]=value;enabled[name]=checked
-            entry=ttk.Entry(win,textvariable=value,state='disabled')
-            ttk.Checkbutton(win,style='Cratelog.TCheckbutton',text=tr(label),variable=checked,command=lambda e=entry,c=checked:e.configure(state='normal' if c.get() else 'disabled')).grid(row=row,column=0,padx=16,pady=7,sticky='w')
-            entry.grid(row=row,column=1,sticky='ew',padx=8)
+            entry=ttk.Entry(win,textvariable=value,state='disabled',font=(UI_FONT,10))
+            ttk.Checkbutton(win,style='Cratelog.TCheckbutton',text=tr(label),variable=checked,command=lambda e=entry,c=checked:e.configure(state='normal' if c.get() else 'disabled')).grid(row=row,column=0,padx=(20,12),pady=9,sticky='w')
+            entry.grid(row=row,column=1,sticky='ew',padx=(0,12),ipady=4)
             if len(values)>1:ttk.Label(win,text=tr('多个不同值')).grid(row=row,column=2,padx=12)
         busy=False
         def close():
@@ -715,8 +734,8 @@ class Player:
                 win.destroy()
                 if errors:messagebox.showerror(tr('部分标签保存失败'),'\n'.join(errors),parent=self.root)
             self.submit(work,done)
-        button=ttk.Button(win,text=tr('保存'),style='Cratelog.TButton',command=save);button.grid(row=10,column=1,pady=18)
-        ttk.Button(win,text=tr('关闭'),style='Cratelog.TButton',command=close).grid(row=10,column=2,padx=12)
+        button=ttk.Button(win,text=tr('保存'),style='Cratelog.TButton',command=save);button.grid(row=10,column=1,pady=(22,18),padx=(0,12),sticky='e')
+        ttk.Button(win,text=tr('关闭'),style='Cratelog.TButton',command=close).grid(row=10,column=2,padx=(0,20),pady=(22,18),sticky='ew')
 
     def edit_tags(self,index):
         from cratelog_tags import FIELDS,read_tags,save_tags,stamp
@@ -738,8 +757,7 @@ class Player:
             try:expected=stamp(path);original=read_tags(path)
             except Exception as e:messagebox.showerror(tr('读取标签失败'),tr(str(e)),parent=self.root);return
         win=tk.Toplevel(self.root);win.title(tr('编辑音频标签'));win.configure(bg='#202428');win.transient(self.root)
-        win.geometry('660x570+{0}+{1}'.format(self.root.winfo_rootx() + 80, self.root.winfo_rooty() + 60))
-        win.columnconfigure(1,weight=1)
+        self.layout_tag_editor(win,700,620 if not is_cue else 290)
         ttk.Label(win,text=tr(key),wraplength=600).grid(row=0,column=0,columnspan=3,padx=16,pady=12,sticky='w')
         variables={}
         win.tag_variables=variables
@@ -747,12 +765,12 @@ class Player:
         def copy(value):win.clipboard_clear();win.clipboard_append(value.get())
         for row,(name,label) in enumerate(FIELDS,1):
             value=tk.StringVar(win,value=original[name]);variables[name]=value
-            ttk.Label(win,text=tr(label)).grid(row=row,column=0,padx=12,pady=5,sticky='w')
-            tk.Entry(win,textvariable=value,bg='#30363c',fg='#e7e7e7',insertbackground='#ffe2aa',relief='flat',
+            ttk.Label(win,text=tr(label),width=18,anchor='e').grid(row=row,column=0,padx=(20,12),pady=9,sticky='e')
+            tk.Entry(win,textvariable=value,font=(UI_FONT,10),bg='#30363c',fg='#e7e7e7',insertbackground='#ffe2aa',relief='flat',
                      borderwidth=0,highlightthickness=1,highlightbackground='#454e56',highlightcolor='#e9a65d',
-                     selectbackground='#704a2c',selectforeground='#ffffff').grid(row=row,column=1,sticky='ew',ipady=5)
+                     selectbackground='#704a2c',selectforeground='#ffffff').grid(row=row,column=1,sticky='ew',ipady=5,padx=(0,12))
             copy_button=ttk.Button(win,image=win.copy_icon,style='Cratelog.TButton',command=lambda v=value:copy(v))
-            copy_button.grid(row=row,column=2,padx=12)
+            copy_button.grid(row=row,column=2,padx=(0,20),sticky='ew')
             Tooltip(copy_button,tr('复制')+' '+tr(label))
         def save():
             if self.current_file==path and self.playback_state!='stopped':
@@ -792,8 +810,8 @@ class Player:
                 self.status.set(tr('音频标签已保存：') + path.name)
                 win.destroy()
             self.submit(work,done)
-        button=ttk.Button(win,text=tr('保存'),style='Cratelog.TButton',command=save);button.grid(row=12,column=1,pady=15)
-        ttk.Button(win,text=tr('关闭'),style='Cratelog.TButton',command=win.destroy).grid(row=12,column=2)
+        button=ttk.Button(win,text=tr('保存'),style='Cratelog.TButton',command=save);button.grid(row=12,column=1,pady=(22,18),padx=(0,12),sticky='e')
+        ttk.Button(win,text=tr('关闭'),style='Cratelog.TButton',command=win.destroy).grid(row=12,column=2,padx=(0,20),pady=(22,18),sticky='ew')
         win.bind('<Escape>',lambda e:win.destroy())
 
     def configure(self):

@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory() as tmp:
     root=tk.Tk();root.withdraw()
     try:
         player=SimpleNamespace(root=root,folder=folder,album={'tracks':[{'filename':f'{i}.wav'} for i in range(2)]},current_file=None,playback_state='stopped',status=tk.StringVar(root),render=lambda:None,submit=lambda work,done:done(work()))
+        player.layout_tag_editor=lambda win,width,height:Player.layout_tag_editor(player,win,width,height)
         Player.edit_tags_batch(player,(0,1))
         win=next(w for w in root.winfo_children() if isinstance(w,tk.Toplevel))
         assert 'title' not in win.tag_variables and 'tracknumber' not in win.tag_variables
