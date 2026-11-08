@@ -186,7 +186,7 @@ class MPV:
                 while not self.closed:
                     line = self.stream.readline()
                     if not line: raise RuntimeError('mpv 事件连接已关闭')
-                    event = json.loads(line)
+                    event = json.loads(line.decode('utf-8',errors='replace') if isinstance(line,bytes) else line)
                     if event.get('request_id') == -i-1:event['_command']=request['command']
                     self.emit(event)
                     if event.get('request_id') == -i-1: break
@@ -194,7 +194,7 @@ class MPV:
             while not self.closed:
                 line = self.stream.readline()
                 if not line: break
-                self.emit(json.loads(line))
+                self.emit(json.loads(line.decode('utf-8',errors='replace') if isinstance(line,bytes) else line))
         except Exception as e:
             if not self.closed: self.events.put(('error', str(e)))
 
@@ -231,7 +231,7 @@ class MPV:
                 while not self.closed:
                     line = self.command_stream.readline()
                     if not line: raise RuntimeError('mpv 控制连接已关闭')
-                    reply = json.loads(line)
+                    reply = json.loads(line.decode('utf-8',errors='replace') if isinstance(line,bytes) else line)
                     # Lifecycle events also arrive on this client; the event
                     # client owns them so end-of-file is never handled twice.
                     if reply.get('request_id') == self.request_id:
@@ -466,6 +466,7 @@ class Player:
         self.tracks.bind('<Leave>',lambda event:self.tracks.configure(cursor=''),add='+')
         self.root.bind('<space>', self.space_next)
         self.tracks.bind('<Button-3>',self.track_menu)
+        self.root.bind('<Alt-Key-3>',self.edit_selected_tags,add='+')
         if sys.platform=='darwin':
             self.tracks.bind('<Button-2>',self.track_menu)
             self.tracks.bind('<Control-Button-1>',self.track_menu)
@@ -605,7 +606,7 @@ class Player:
         selected=tuple(int(item) for item in self.tracks.selection())
         menu=tk.Menu(self.root,tearoff=False,bg='#30363c',fg='#e7e7e7',font=(UI_FONT,10))
         menu.add_command(label=tr('复制曲名'),command=lambda:self.copy_track_info(int(row)))
-        menu.add_command(label=tr('编辑音频标签（ID3）'),command=lambda:self.edit_tags_batch(selected) if len(selected)>1 else self.edit_tags(int(row)))
+        menu.add_command(label=tr('编辑音频标签（ID3）'),accelerator='Alt+3',command=lambda:self.edit_tags_batch(selected) if len(selected)>1 else self.edit_tags(int(row)))
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release()
         return 'break'
@@ -632,6 +633,14 @@ class Player:
         text='[::] '+ ' - '.join((artist,title,album))+' ['+', '.join((label,year))+']'
         self.root.clipboard_clear();self.root.clipboard_append(text)
         self.status.set(tr('已复制：')+text)
+
+    def edit_selected_tags(self,event=None):
+        if self.root.grab_current() or (event is not None and event.widget.winfo_toplevel()!=self.root):return
+        if not self.album:return
+        selected=tuple(int(item) for item in self.tracks.selection())
+        if len(selected)>1:self.edit_tags_batch(selected)
+        elif selected:self.edit_tags(selected[0])
+        return 'break'
 
     def edit_tags_batch(self,indices):
         from cratelog_tags import FIELDS,read_tags,save_tags,stamp
@@ -1680,6 +1689,13 @@ class Player:
     def update_track_tags(self, metadata):
         if not self.current_file:return
         tags={str(k).lower(): ' '.join(str(v).split()) for k,v in (metadata or {}).items() if v is not None} if isinstance(metadata,dict) else {}
+        if any('\ufffd' in value for value in tags.values()):
+            from cratelog_tags import read_tags
+            try:
+                local=read_tags(self.current_file)
+                for key,value in list(tags.items()):
+                    if local.get(key):tags[key]=local[key]
+            except Exception:pass
         if self.lastfm_loaded:self.lastfm_tags=tags
         self.now.set(self.cue_title or tags.get('title') or self.current_file.name)
         self.tag_details=' · '.join(v for v in (tags.get('artist'),tags.get('album')) if v)

@@ -53,6 +53,29 @@ def parse_cue(cue,root):
     return tracks
 
 
+def display_tag_text(value,normalize=True):
+    """Recover mislabeled legacy ID3 text for display without changing the file."""
+    text=str(value or '')
+    try:
+        recovered=text.encode('latin-1').decode('utf-8')
+        if any(ord(c)>127 for c in recovered):text=recovered
+    except UnicodeError:
+        # Older Chinese ID3 writers put GBK bytes in Latin-1 text frames.
+        # Require multiple high bytes and predominantly CJK output to avoid
+        # interpreting ordinary accented Western names as Chinese.
+        try:
+            raw=text.encode('latin-1')
+            high=sum(byte>=128 for byte in raw)
+            recovered=raw.decode('gbk')
+            non_ascii=[c for c in recovered if ord(c)>127]
+            cjk=sum('\u3400'<=c<='\u9fff' for c in non_ascii)
+            if high>=4 and non_ascii and cjk/len(non_ascii)>=.8:
+                text=recovered
+        except UnicodeError:
+            pass
+    return ' '.join(text.split()) if normalize else text
+
+
 def read_audio_info(file,reader):
     stat=file.stat()
     title='';artist='';bitrate=0;bits=0
@@ -67,13 +90,18 @@ def read_audio_info(file,reader):
             if tags is not None:
                 value=tags.get('TIT2') or tags.get('title') or tags.get('\xa9nam')
                 if isinstance(value,(list,tuple)):value=value[0] if value else ''
-                title=' '.join(str(value or '').split())
+                title=display_tag_text(value)
                 value=tags.get('TPE1') or tags.get('artist') or tags.get('\xa9ART')
                 if isinstance(value,(list,tuple)):value='; '.join(str(v) for v in value)
-                artist=' '.join(str(value or '').split())
+                artist=display_tag_text(value)
+                if tags.get('TIT2') is not None or tags.get('TPE1') is not None or file.suffix.lower()=='.wma':
+                    from cratelog_tags import read_tags
+                    decoded=read_tags(file)
+                    title=' '.join(decoded.get('title','').split())
+                    artist=' '.join(decoded.get('artist','').split())
         if seconds is not None and (not math.isfinite(seconds) or seconds<=0):seconds=None
     except Exception:seconds=None
-    return {'reader':4,'size':stat.st_size,'mtime':stat.st_mtime_ns,'seconds':seconds,'title':title,'artist':artist,'bitrate':bitrate,'bits':bits}
+    return {'reader':7,'size':stat.st_size,'mtime':stat.st_mtime_ns,'seconds':seconds,'title':title,'artist':artist,'bitrate':bitrate,'bits':bits}
 
 
 def scan_tracks(root,album,audio_extensions,reader,recursive=False):
@@ -92,7 +120,7 @@ def scan_tracks(root,album,audio_extensions,reader,recursive=False):
         name=file.relative_to(root).as_posix()
         if name in durations:return durations[name]['seconds']
         stat=file.stat();cached=album.get('_durations',{}).get(name,{})
-        if cached.get('reader')==4 and cached.get('seconds') is not None and cached.get('size')==stat.st_size and cached.get('mtime')==stat.st_mtime_ns:
+        if cached.get('reader')==7 and cached.get('seconds') is not None and cached.get('size')==stat.st_size and cached.get('mtime')==stat.st_mtime_ns:
             durations[name]=cached;return cached['seconds']
         durations[name]=read_audio_info(file,reader)
         seconds=durations[name]['seconds']

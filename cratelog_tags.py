@@ -7,6 +7,8 @@ from cratelog_library import AudioMetadata
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TPE2, TDRC, TRCK, TPOS, TCON, TCOM, COMM
 from mutagen.mp4 import MP4
 from mutagen.apev2 import APEv2
+from mutagen.asf import ASF
+from cratelog_tracks import display_tag_text
 
 FIELDS = [('title','曲名'),('artist','艺术家'),('album','专辑'),('albumartist','专辑艺术家'),('date','发行年份 / 日期'),('tracknumber','音轨编号'),('discnumber','碟号'),('genre','流派'),('composer','作曲者'),('comment','备注')]
 FRAMES = dict(zip([k for k,_ in FIELDS], [TIT2,TPE1,TALB,TPE2,TDRC,TRCK,TPOS,TCON,TCOM,COMM]))
@@ -17,6 +19,9 @@ MP4_FIELDS={'title':'\xa9nam','artist':'\xa9ART','album':'\xa9alb','albumartist'
             'date':'\xa9day','tracknumber':'trkn','discnumber':'disk','genre':'\xa9gen',
             'composer':'\xa9wrt','comment':'\xa9cmt'}
 APE_FIELDS={'albumartist':'Album Artist','date':'Year','tracknumber':'Track','discnumber':'Disc'}
+ASF_FIELDS={'title':'Title','artist':'Author','album':'WM/AlbumTitle',
+            'albumartist':'WM/AlbumArtist','date':'WM/Year','tracknumber':'WM/TrackNumber',
+            'discnumber':'WM/PartOfSet','genre':'WM/Genre','composer':'WM/Composer','comment':'Description'}
 
 def mp4_value(key,value):
     if key not in ('tracknumber','discnumber'):return [value]
@@ -31,6 +36,9 @@ def read_tags(path):
     audio=AudioMetadata(path)
     if audio is None:raise ValueError('无法识别此音频文件')
     tags=audio.tags
+    if isinstance(audio,ASF):
+        return {key:'; '.join(str(v) for v in (tags.get(attribute,[]) if tags is not None else []))
+                for key,attribute in ASF_FIELDS.items()}
     if isinstance(audio,MP4):
         result={}
         for key,atom in MP4_FIELDS.items():
@@ -40,7 +48,25 @@ def read_tags(path):
             else:result[key]='; '.join(str(v) for v in values)
         return result
     if isinstance(tags,ID3) or Path(path).suffix.lower() in ('.mp3','.mpa','.wav','.aif','.aiff'):
-        return {key:'; '.join(str(t) for frame in (tags.getall(cls.__name__) if tags else []) for t in frame.text) for key,cls in FRAMES.items()}
+        legacy=[str(t) for cls in FRAMES.values() for frame in (tags.getall(cls.__name__) if tags else []) if frame.encoding==0 for t in frame.text]
+        gbk=False
+        for text in legacy:
+            try:
+                raw=text.encode('latin-1')
+                try:raw.decode('utf-8');continue
+                except UnicodeError:pass
+                decoded=raw.decode('gbk')
+                non_ascii=[c for c in decoded if ord(c)>127]
+                if sum(b>=128 for b in raw)>=4 and non_ascii and all('\u3400'<=c<='\u9fff' for c in non_ascii):gbk=True
+            except UnicodeError:pass
+        def legacy_text(text):
+            if gbk:
+                try:return str(text).encode('latin-1').decode('gbk')
+                except UnicodeError:pass
+            return display_tag_text(text,normalize=False)
+        return {key:'; '.join(legacy_text(t) if frame.encoding==0 else str(t)
+                            for frame in (tags.getall(cls.__name__) if tags else []) for t in frame.text)
+                for key,cls in FRAMES.items()}
     if Path(path).suffix.lower() not in ('.flac','.ogg','.opus','.ape'):raise ValueError('当前支持 MP3、MPA、WAV、AIFF、FLAC、APE、OGG、Opus、M4A 标签编辑')
     result={}
     for key,_ in FIELDS:
@@ -69,6 +95,10 @@ def save_tags(path,values,original,expected):
                 atom=MP4_FIELDS[key]
                 if value:audio.tags[atom]=mp4_value(key,value)
                 elif atom in audio.tags:del audio.tags[atom]
+            elif isinstance(audio,ASF):
+                attribute=ASF_FIELDS[key]
+                if value:audio.tags[attribute]=[value]
+                elif attribute in audio.tags:del audio.tags[attribute]
             elif isinstance(audio.tags,ID3):
                 cls=FRAMES[key];audio.tags.delall(cls.__name__)
                 if value:
